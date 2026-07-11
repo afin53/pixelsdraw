@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>pixel for world - Gamer Edition</title>
+    <title>pixel for world - Optimization</title>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         body {
@@ -165,7 +165,7 @@
         </div>
         
         <canvas id="canvas"></canvas>
-        <div id="save-timer">Мережа: ⚡ Realtime P2P (60 FPS)</div>
+        <div id="save-timer">Супа: 🛡️ Дедуплікація увімкнена</div>
     </div>
 
     <div id="tooltip"></div>
@@ -188,7 +188,8 @@
         let rawDataHistory = [];
         
         let broadcastQueue = [];
-        let dbInsertQueue = [];
+        // МАГІЯ: Використовуємо Map, щоб відкидати дублікати координат для Супи
+        let dbInsertMap = new Map(); 
 
         let room;
         let onlineUsers = new Set();
@@ -290,14 +291,12 @@
                 color = '#ffffff';
                 targetLockState = false;
 
-                // Перевірка на замок
                 const centerPixel = pixelMap[`${coords.x},${coords.y}`];
                 if (centerPixel && centerPixel.locked && centerPixel.author !== currentUser) {
                     return; 
                 }
             }
 
-            // Малюємо локально ОДРАЗУ
             drawBlock(startX, startY, size, color, currentUser, targetLockState);
             
             const actionData = { 
@@ -305,8 +304,13 @@
                 user_nickname: currentUser, is_locked: targetLockState 
             };
             
+            // 1. Надсилаємо миттєво іншим гравцям по P2P
             broadcastQueue.push(actionData);
-            dbInsertQueue.push(actionData);
+            
+            // 2. ЗАПИСУЄМО В MAP: Якщо ти проведеш по цьому місцю ще раз за 2 секунди, старий запис просто перезапишеться, а не додасться до черги!
+            const coordKey = `${startX},${startY}`;
+            dbInsertMap.set(coordKey, actionData);
+            
             rawDataHistory.push(actionData);
         }
 
@@ -356,7 +360,7 @@
         }
 
         function startNetworkLoops() {
-            // "Геймерська" швидкість сокетів (кожні 60мс)
+            // Швидкісні P2P сокети (60мс) - візуально літає
             setInterval(() => {
                 if (broadcastQueue.length > 0) {
                     room.send({ type: 'broadcast', event: 'p2p_action', payload: broadcastQueue });
@@ -364,12 +368,23 @@
                 }
             }, 60);
 
-            // Тихе фонове збереження
+            // Надійна та оптимізована Супа (2 секунди)
             setInterval(async () => {
-                if (dbInsertQueue.length > 0) {
-                    const batch = [...dbInsertQueue];
-                    dbInsertQueue = [];
-                    await supabaseClient.from('pixels').insert(batch);
+                if (dbInsertMap.size > 0) {
+                    // Конвертуємо наш очищений від дублікатів словник назад у масив
+                    const batch = Array.from(dbInsertMap.values());
+                    dbInsertMap.clear();
+
+                    // Розбиваємо на чанки по 400 пікселів, щоб Супа точно не вдавилася
+                    const chunkSize = 400;
+                    for (let i = 0; i < batch.length; i += chunkSize) {
+                        const chunk = batch.slice(i, i + chunkSize);
+                        try {
+                            await supabaseClient.from('pixels').insert(chunk);
+                        } catch (err) {
+                            console.error("Помилка збереження в Супу:", err);
+                        }
+                    }
                 }
             }, 2000);
         }
