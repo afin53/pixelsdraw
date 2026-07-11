@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>малювання міні піксель артів</title>
+    <title>Pixel Art Reddit Community</title>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         body {
@@ -103,7 +103,6 @@
             top: 0;
             left: 0;
             cursor: crosshair;
-            /* ВАЖЛИВО ДЛЯ ТЕЛЕФОНІВ: вимикає скрол і зум при малюванні */
             touch-action: none; 
         }
         #tooltip {
@@ -132,7 +131,7 @@
         <div class="toolbar">
             <input type="color" id="colorPicker" value="#000000">
             <button id="brushBtn" class="active" onclick="setTool('brush')">🖌️ Пензлик</button>
-            <button id="eraserBtn" onclick="setTool('eraser')">Ластік</button>
+            <button id="eraserBtn" onclick="setTool('eraser')">🧽 Ластік</button>
             
             <div class="brush-size-container">
                 <input type="range" id="brushSize" min="1" max="50" value="5">
@@ -157,6 +156,7 @@
         let isDrawing = false;
         const pixelMap = {}; 
         let rawDataHistory = [];
+        let lastSaveTime = 0; // Для оптимізації відправки даних
 
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
@@ -197,33 +197,36 @@
             document.getElementById('eraserBtn').classList.toggle('active', tool === 'eraser');
         }
 
-        // Отримання координат для мишки ТА тачскріну
         function getCoords(e) {
             const rect = canvas.getBoundingClientRect();
             let clientX = e.clientX;
             let clientY = e.clientY;
-
-            // Якщо це дотик на телефоні
             if (e.touches && e.touches.length > 0) {
                 clientX = e.touches[0].clientX;
                 clientY = e.touches[0].clientY;
             }
-
             return {
                 x: Math.floor(clientX - rect.left),
                 y: Math.floor(clientY - rect.top)
             };
         }
 
-        function drawPixel(x, y, color, author) {
+        // Нова функція, яка малює цілий блок (квадрат) одразу
+        function drawBlock(startX, startY, size, color, author) {
             ctx.fillStyle = color;
-            ctx.fillRect(x, y, 1, 1);
-            pixelMap[`${x},${y}`] = author;
-        }
+            ctx.fillRect(startX, startY, size, size);
 
-        function clearPixelLocally(x, y) {
-            ctx.clearRect(x, y, 1, 1);
-            delete pixelMap[`${x},${y}`];
+            // Зберігаємо автора для кожної точки всередині блоку (щоб працював тултип)
+            // Локальна пам'ять JS витримає це легко, на відміну від бази даних
+            for (let i = startX; i < startX + size; i++) {
+                for (let j = startY; j < startY + size; j++) {
+                    if (color === '#ffffff') {
+                        delete pixelMap[`${i},${j}`];
+                    } else {
+                        pixelMap[`${i},${j}`] = author;
+                    }
+                }
+            }
         }
 
         async function handlePaint(e) {
@@ -232,65 +235,31 @@
             
             const startX = coords.x - Math.floor(size / 2);
             const startY = coords.y - Math.floor(size / 2);
-            const endX = startX + size;
-            const endY = startY + size;
+            const color = currentTool === 'eraser' ? '#ffffff' : colorPicker.value;
 
-            if (currentTool === 'eraser') {
-                // Очищаємо полотно локально
-                ctx.clearRect(startX, startY, size, size);
-                for (let i = startX; i < endX; i++) {
-                    for (let j = startY; j < endY; j++) {
-                        delete pixelMap[`${i},${j}`];
-                    }
-                }
+            // Відмальовуємо локально
+            drawBlock(startX, startY, size, color, currentUser);
+
+            // ОПТИМІЗАЦІЯ: Відправляємо в базу не частіше ніж 1 раз на 20мс (щоб не спамити при швидкому русі)
+            const now = Date.now();
+            if (now - lastSaveTime > 20) {
+                lastSaveTime = now;
                 
-                // Видаляємо блок пікселів з бази даних Supabase
-                await supabaseClient.from('pixels')
-                    .delete()
-                    .gte('x', startX)
-                    .lt('x', endX)
-                    .gte('y', startY)
-                    .lt('y', endY);
-
-            } else {
-                // Малювання пензликом
-                const color = colorPicker.value;
-                const rowsToInsert = [];
-
-                for (let i = startX; i < endX; i++) {
-                    for (let j = startY; j < endY; j++) {
-                        drawPixel(i, j, color, currentUser);
-                        rowsToInsert.push({ x: i, y: j, color: color, user_nickname: currentUser });
-                    }
-                }
-
-                if (rowsToInsert.length > 0) {
-                    const optimizedRows = rowsToInsert.slice(0, 50); 
-                    await supabaseClient.from('pixels').insert(optimizedRows);
-                }
+                // ВІДПРАВЛЯЄМО ЛИШЕ 1 РЯДОК ЗАМІСТЬ 2500!
+                await supabaseClient.from('pixels').insert([
+                    { x: startX, y: startY, size: size, color: color, user_nickname: currentUser }
+                ]);
             }
         }
 
-        // Обробники для МИШКИ
         canvas.addEventListener('mousedown', (e) => { isDrawing = true; handlePaint(e); });
         canvas.addEventListener('mousemove', (e) => { if (isDrawing) handlePaint(e); });
         window.addEventListener('mouseup', () => { isDrawing = false; });
 
-        // Обробники для ТЕЛЕФОНІВ (Сенсор)
-        canvas.addEventListener('touchstart', (e) => { 
-            e.preventDefault(); // Зупиняє скрол сторінки
-            isDrawing = true; 
-            handlePaint(e); 
-        }, { passive: false });
-        
-        canvas.addEventListener('touchmove', (e) => { 
-            e.preventDefault(); 
-            if (isDrawing) handlePaint(e); 
-        }, { passive: false });
-        
+        canvas.addEventListener('touchstart', (e) => { e.preventDefault(); isDrawing = true; handlePaint(e); }, { passive: false });
+        canvas.addEventListener('touchmove', (e) => { e.preventDefault(); if (isDrawing) handlePaint(e); }, { passive: false });
         window.addEventListener('touchend', () => { isDrawing = false; });
 
-        // Ховер (Тільки для ПК, на телефонах тултип не потрібен)
         canvas.addEventListener('mousemove', (e) => {
             if (isDrawing || (e.touches && e.touches.length > 0)) return;
             const coords = getCoords(e);
@@ -311,13 +280,21 @@
 
         function redrawEverything() {
             ctx.clearRect(0, 0, canvas.width, canvas.height); 
+            // Відмальовуємо всю історію (починаючи зі старих, перекриваючи новими)
             rawDataHistory.forEach(p => {
-                drawPixel(p.x, p.y, p.color, p.user_nickname);
+                // Якщо раптом старих записів немає size, ставимо 1
+                const s = p.size || 1;
+                drawBlock(p.x, p.y, s, p.color, p.user_nickname);
             });
         }
 
         async function loadPixels() {
-            const { data, error } = await supabaseClient.from('pixels').select('*');
+            // Завантажуємо максимум 100 000 останніх дій, щоб не перевантажити клієнт
+            const { data, error } = await supabaseClient.from('pixels')
+                .select('*')
+                .order('created_at', { ascending: true }) // Малюємо в хронологічному порядку
+                .limit(100000); 
+
             if (data) {
                 rawDataHistory = data;
                 redrawEverything();
@@ -325,24 +302,13 @@
         }
 
         function subscribeToRealtime() {
-            // Тепер слухаємо ВСІ події: і INSERT, і DELETE
             supabaseClient.channel('public:pixels')
-                .on('postgres_changes', { event: '*', schema: 'public', table: 'pixels' }, payload => {
-                    
-                    if (payload.eventType === 'INSERT') {
-                        const p = payload.new;
-                        if (p.user_nickname !== currentUser) {
-                            rawDataHistory.push(p);
-                            drawPixel(p.x, p.y, p.color, p.user_nickname);
-                        }
-                    } 
-                    
-                    if (payload.eventType === 'DELETE') {
-                        const oldRow = payload.old;
-                        // Видаляємо чужий стираний піксель (якщо є координати)
-                        if (oldRow && oldRow.x !== undefined && oldRow.y !== undefined) {
-                            clearPixelLocally(oldRow.x, oldRow.y);
-                        }
+                .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'pixels' }, payload => {
+                    const p = payload.new;
+                    if (p.user_nickname !== currentUser) {
+                        rawDataHistory.push(p);
+                        const s = p.size || 1;
+                        drawBlock(p.x, p.y, s, p.color, p.user_nickname);
                     }
                 })
                 .subscribe();
