@@ -137,7 +137,6 @@
             color: rgba(255,255,255,0.3);
             pointer-events: none;
             z-index: 10;
-            font-family: sans-serif;
         }
     </style>
 </head>
@@ -166,7 +165,7 @@
         </div>
         
         <canvas id="canvas"></canvas>
-        <div id="save-timer">Мережа: ⚡ Realtime P2P</div>
+        <div id="save-timer">Режим: 📶 Слабкий інтернет (Оптимізовано)</div>
     </div>
 
     <div id="tooltip"></div>
@@ -180,20 +179,18 @@
         let currentTool = 'brush';
         let isDrawing = false;
         let isLockedMode = false;
-        let lastPaintTime = 0; 
+        
+        // Для інтерполяції ліній (Lerp)
+        let lastX = null;
+        let lastY = null;
+        let lastPaintTime = 0;
         
         const pixelMap = {}; 
         let rawDataHistory = [];
         
-        // Буфери для надшвидкого обміну між гравцями (100мс)
-        let broadcastInserts = [];
-        let broadcastDeletes = [];
+        let broadcastQueue = [];
+        let dbInsertQueue = [];
 
-        // Буфери для тихих фонових збережень у БД (2 секунди)
-        let pendingInserts = [];
-        let pendingDeletes = [];
-
-        // Для системи голосування
         let room;
         let onlineUsers = new Set();
         let votedUsers = new Set();
@@ -272,65 +269,88 @@
             }
         }
 
-        function handlePaint(e) {
-            const coords = getCoords(e);
-            const size = parseInt(brushSizeInput.value);
-            const startX = coords.x - Math.floor(size / 2);
-            const startY = coords.y - Math.floor(size / 2);
-            const color = currentTool === 'eraser' ? '#ffffff' : colorPicker.value;
+        // Функція малювання та інтерполяції (Lerp) між точками для компенсації лагів
+        function paintSequence(x1, y1, x2, y2, size, color, targetLockState) {
+            const dist = Math.hypot(x2 - x1, y2 - y1);
+            const steps = Math.max(Math.ceil(dist / (size / 3 || 1)), 1);
 
-            // Обмеження частоти зчитування для ідеальної плавності ліній (15мс)
-            const now = Date.now();
-            if (now - lastPaintTime < 15) return;
-            lastPaintTime = now;
+            for (let step = 0; step <= steps; step++) {
+                const t = steps === 0 ? 0 : step / steps;
+                const curX = Math.floor(x1 + (x2 - x1) * t);
+                const curY = Math.floor(y1 + (y2 - y1) * t);
+                const startX = curX - Math.floor(size / 2);
+                const startY = curY - Math.floor(size / 2);
 
-            if (currentTool === 'eraser' || color === '#ffffff') {
-                let canDeleteAny = false;
-                
-                for (let i = startX; i < startX + size; i++) {
-                    for (let j = startY; j < startY + size; j++) {
-                        const p = pixelMap[`${i},${j}`];
-                        if (!p || !p.locked || p.author === currentUser) {
-                            ctx.fillStyle = '#ffffff';
-                            ctx.fillRect(i, j, 1, 1);
-                            delete pixelMap[`${i},${j}`];
-                            canDeleteAny = true;
-                        }
+                if (currentTool === 'eraser') {
+                    const centerPixel = pixelMap[`${curX},${curY}`];
+                    if (centerPixel && centerPixel.locked && centerPixel.author !== currentUser) {
+                        continue; 
                     }
                 }
-                
-                if (canDeleteAny) {
-                    const deleteAction = { startX, startY, size, user: currentUser };
-                    broadcastDeletes.push(deleteAction);
-                    pendingDeletes.push(deleteAction);
-                }
-            } else {
-                drawBlock(startX, startY, size, color, currentUser, isLockedMode);
-                
-                const newPixel = { 
-                    x: startX, y: startY, size: size, color: color, 
-                    user_nickname: currentUser, is_locked: isLockedMode 
+
+                drawBlock(startX, startY, size, color, currentUser, targetLockState);
+
+                // Стискаємо імена ключів об'єкта для супер-економії мережевого трафіку
+                const compressedAction = { 
+                    x: startX, y: startY, s: size, c: color, 
+                    u: currentUser, l: targetLockState ? 1 : 0 
                 };
                 
-                broadcastInserts.push(newPixel);
-                pendingInserts.push(newPixel);
-                rawDataHistory.push(newPixel); 
+                broadcastQueue.push(compressedAction);
+
+                // Для збереження в БД повертаємо стандартні назви полів
+                dbInsertQueue.push({
+                    x: startX, y: startY, size: size, color: color,
+                    user_nickname: currentUser, is_locked: targetLockState
+                });
+
+                rawDataHistory.push({
+                    x: startX, y: startY, size: size, color: color,
+                    user_nickname: currentUser, is_locked: targetLockState
+                });
             }
         }
 
-        canvas.addEventListener('mousedown', (e) => { isDrawing = true; handlePaint(e); });
-        canvas.addEventListener('mousemove', (e) => { if (isDrawing) handlePaint(e); });
-        window.addEventListener('mouseup', () => { isDrawing = false; });
+        function handlePaint(e) {
+            const coords = getCoords(e);
+            const size = parseInt(brushSizeInput.value);
+            
+            const now = Date.now();
+            if (now - lastPaintTime < 10) return; 
+            lastPaintTime = now;
 
-        canvas.addEventListener('touchstart', (e) => { e.preventDefault(); isDrawing = true; handlePaint(e); }, { passive: false });
+            let color = colorPicker.value;
+            let targetLockState = isLockedMode;
+
+            if (currentTool === 'eraser') {
+                color = '#ffffff';
+                targetLockState = false;
+            }
+
+            if (lastX === null || lastY === null) {
+                lastX = coords.x;
+                lastY = coords.y;
+            }
+
+            // Малюємо суцільну лінію від старої координати до нової
+            paintSequence(lastX, lastY, coords.x, coords.y, size, color, targetLockState);
+            
+            lastX = coords.x;
+            lastY = coords.y;
+        }
+
+        canvas.addEventListener('mousedown', (e) => { isDrawing = true; lastX = null; lastY = null; handlePaint(e); });
+        canvas.addEventListener('mousemove', (e) => { if (isDrawing) handlePaint(e); });
+        window.addEventListener('mouseup', () => { isDrawing = false; lastX = null; lastY = null; });
+
+        canvas.addEventListener('touchstart', (e) => { e.preventDefault(); isDrawing = true; lastX = null; lastY = null; handlePaint(e); }, { passive: false });
         canvas.addEventListener('touchmove', (e) => { e.preventDefault(); if (isDrawing) handlePaint(e); }, { passive: false });
-        window.addEventListener('touchend', () => { isDrawing = false; });
+        window.addEventListener('touchend', () => { isDrawing = false; lastX = null; lastY = null; });
 
         canvas.addEventListener('mousemove', (e) => {
             if (isDrawing || (e.touches && e.touches.length > 0)) return;
             const coords = getCoords(e);
-            const key = `${coords.x},${coords.y}`;
-            const p = pixelMap[key];
+            const p = pixelMap[`${coords.x},${coords.y}`];
 
             if (p) {
                 tooltip.style.display = 'block';
@@ -352,12 +372,6 @@
             });
         }
 
-        let redrawTimeout = null;
-        function scheduleRedraw() {
-            if (redrawTimeout) clearTimeout(redrawTimeout);
-            redrawTimeout = setTimeout(() => { redrawEverything(); }, 20);
-        }
-
         async function loadPixels() {
             const { data } = await supabaseClient.from('pixels')
                 .select('*')
@@ -370,43 +384,25 @@
             }
         }
 
-        // --- МЕРЕЖЕВІ ЦИКЛИ ТА СИНХРОНІЗАЦІЯ ---
         function startNetworkLoops() {
-            // 1. НАДШВИДКИЙ цикл обміну між гравцями (100мс) - ТУТ НЕМАЄ ЗАПИТІВ ДО БД, ТОМУ ЦЕ НЕ ЛАГАЄ!
+            // ОПТИМІЗАЦІЯ ІНТЕРНЕТУ: пакетуємо дані раз на 180мс (замість 70мс). Повільний інтернет скаже дякую!
             setInterval(() => {
-                if (broadcastInserts.length > 0) {
-                    room.send({ type: 'broadcast', event: 'p2p_draw', payload: broadcastInserts });
-                    broadcastInserts = [];
+                if (broadcastQueue.length > 0) {
+                    room.send({ type: 'broadcast', event: 'p2p_action', payload: broadcastQueue });
+                    broadcastQueue = [];
                 }
-                if (broadcastDeletes.length > 0) {
-                    room.send({ type: 'broadcast', event: 'p2p_erase', payload: broadcastDeletes });
-                    broadcastDeletes = [];
-                }
-            }, 100);
+            }, 180);
 
-            // 2. Тихий фоновий цикл збереження в БД (кожні 2 секунди)
+            // Рідкісний тихий запис у базу (кожні 3.5 секунди), щоб розвантажити твій інет-канал
             setInterval(async () => {
-                if (pendingInserts.length > 0) {
-                    const batch = [...pendingInserts];
-                    pendingInserts = [];
+                if (dbInsertQueue.length > 0) {
+                    const batch = [...dbInsertQueue];
+                    dbInsertQueue = [];
                     await supabaseClient.from('pixels').insert(batch);
                 }
-                if (pendingDeletes.length > 0) {
-                    const deletes = [...pendingDeletes];
-                    pendingDeletes = [];
-                    // Виконуємо видалення послідовно, щоб не перевантажувати пул підключень Supabase
-                    for (let d of deletes) {
-                        await supabaseClient.from('pixels')
-                            .delete()
-                            .gte('x', d.startX).lte('x', d.startX + d.size)
-                            .gte('y', d.startY).lte('y', d.startY + d.size)
-                            .or(`is_locked.eq.false,user_nickname.eq.${currentUser}`);
-                    }
-                }
-            }, 2000);
+            }, 3500);
         }
 
-        // --- REALTIME ТА ГОЛОСУВАННЯ (ОПТИМІЗОВАНО) ---
         function setupRealtimeAndPresence() {
             room = supabaseClient.channel('pixel_room', {
                 config: { presence: { key: currentUser } }
@@ -428,50 +424,26 @@
                 checkClearCondition();
             });
 
-            // Слухаємо миттєве малювання інших гравців по P2P WebSockets
-            room.on('broadcast', { event: 'p2p_draw' }, (payload) => {
-                const pixels = payload.payload;
-                pixels.forEach(p => {
-                    rawDataHistory.push(p);
-                    drawBlock(p.x, p.y, p.size || 1, p.color, p.user_nickname, p.is_locked);
+            // Читання стиснутих P2P пакетів від інших гравців
+            room.on('broadcast', { event: 'p2p_action' }, (payload) => {
+                const compressedActions = payload.payload;
+                compressedActions.forEach(p => {
+                    // Розпаковуємо короткі ключі назад у стандартну структуру
+                    const uncompressed = {
+                        x: p.x, y: p.y, size: p.s, color: p.c,
+                        user_nickname: p.u, is_locked: p.l === 1
+                    };
+                    rawDataHistory.push(uncompressed);
+                    drawBlock(uncompressed.x, uncompressed.y, uncompressed.size, uncompressed.color, uncompressed.user_nickname, uncompressed.is_locked);
                 });
             });
 
-            // Слухаємо миттєве стирання інших гравців по P2P WebSockets
-            room.on('broadcast', { event: 'p2p_erase' }, (payload) => {
-                const erases = payload.payload;
-                erases.forEach(d => {
-                    for (let i = d.startX; i < d.startX + d.size; i++) {
-                        for (let j = d.startY; j < d.startY + d.size; j++) {
-                            const p = pixelMap[`${i},${j}`];
-                            if (!p || !p.locked || p.author === d.user) {
-                                ctx.fillStyle = '#ffffff';
-                                ctx.fillRect(i, j, 1, 1);
-                                delete pixelMap[`${i},${j}`];
-                            }
-                        }
-                    }
-                });
-
-                // Оптимізовано: чистимо історію масиву ОДИН раз для всього пакету, а не для кожного рядка окремо!
-                rawDataHistory = rawDataHistory.filter(item => {
-                    return !erases.some(d => {
-                        const hit = (item.x >= d.startX && item.x <= d.startX + d.size && item.y >= d.startY && item.y <= d.startY + d.size);
-                        if (hit && (!item.is_locked || item.user_nickname === d.user)) {
-                            return true;
-                        }
-                        return false;
-                    });
-                });
-            });
-
-            // Слухаємо повне очищення карти (вайп)
             room.on('broadcast', { event: 'p2p_wipe' }, () => {
                 votedUsers.clear();
                 myVote = false;
                 document.getElementById('voteBtn').classList.remove('active');
                 rawDataHistory = [];
-                scheduleRedraw();
+                redrawEverything();
                 updateVoteUI();
             });
 
@@ -504,10 +476,7 @@
             const total = onlineUsers.size || 1;
             
             if (activeVotes.length >= total && total > 0) {
-                // Очищаємо базу даних
                 await supabaseClient.from('pixels').delete().neq('size', -1);
-                
-                // Миттєво сповіщаємо всіх інших гравців сокетом, щоб очистити екран в 1 мілісекунду
                 room.send({ type: 'broadcast', event: 'p2p_wipe', payload: {} });
 
                 votedUsers.clear();
@@ -515,7 +484,7 @@
                 document.getElementById('voteBtn').classList.remove('active');
                 
                 rawDataHistory = [];
-                scheduleRedraw();
+                redrawEverything();
                 updateVoteUI();
                 alert("Усі проголосували! Полотно очищено 🧨");
             }
