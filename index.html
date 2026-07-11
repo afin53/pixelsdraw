@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Pixel Art Reddit Community</title>
+    <title>pixel for world</title>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         body {
@@ -68,8 +68,8 @@
             z-index: 5;
             flex-wrap: wrap;
             justify-content: center;
-            width: 90%;
-            max-width: 600px;
+            width: 95%;
+            max-width: 800px;
         }
         .toolbar button {
             padding: 8px 12px;
@@ -79,9 +79,21 @@
             cursor: pointer;
             background: #7f8c8d;
             color: white;
+            transition: 0.2s;
         }
         .toolbar button.active {
             background: #2ecc71;
+        }
+        .toolbar button.locked-btn.active {
+            background: #f1c40f;
+            color: #2c3e50;
+        }
+        .toolbar button.vote-btn {
+            background: #c0392b;
+        }
+        .toolbar button.vote-btn.active {
+            background: #e74c3c;
+            box-shadow: 0 0 10px #e74c3c;
         }
         .brush-size-container {
             display: flex;
@@ -117,6 +129,16 @@
             z-index: 9999;
             white-space: nowrap;
         }
+        #save-timer {
+            position: fixed;
+            bottom: 10px;
+            right: 15px;
+            font-size: 12px;
+            color: rgba(0,0,0,0.4);
+            pointer-events: none;
+            z-index: 10;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
@@ -132,16 +154,19 @@
             <input type="color" id="colorPicker" value="#000000">
             <button id="brushBtn" class="active" onclick="setTool('brush')">🖌️ Пензлик</button>
             <button id="eraserBtn" onclick="setTool('eraser')">🧽 Ластік</button>
+            <button id="lockToggleBtn" class="locked-btn" onclick="toggleLock()">🔓 Замок (Вимк)</button>
             
             <div class="brush-size-container">
                 <input type="range" id="brushSize" min="1" max="50" value="5">
                 <span id="sizeVal">5px</span>
             </div>
             
+            <button id="voteBtn" class="vote-btn" onclick="castVote()">🧨 Стерти все (0/0)</button>
             <span id="userInfo" style="font-weight: bold; margin-left: 5px;"></span>
         </div>
         
         <canvas id="canvas"></canvas>
+        <div id="save-timer">Збереження через: <span id="timer-sec">10</span>с</div>
     </div>
 
     <div id="tooltip"></div>
@@ -154,9 +179,21 @@
         let currentUser = '';
         let currentTool = 'brush';
         let isDrawing = false;
+        let isLockedMode = false;
+        
         const pixelMap = {}; 
         let rawDataHistory = [];
-        let lastSaveTime = 0; 
+        
+        // Буфери для пакетного збереження кожні 10 секунд
+        let pendingInserts = [];
+        let pendingDeletes = [];
+        let saveCountdown = 10;
+
+        // Для системи голосування
+        let room;
+        let onlineUsers = new Set();
+        let votedUsers = new Set();
+        let myVote = false;
 
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
@@ -164,6 +201,7 @@
         const colorPicker = document.getElementById('colorPicker');
         const brushSizeInput = document.getElementById('brushSize');
         const sizeValDisplay = document.getElementById('sizeVal');
+        const timerDisplay = document.getElementById('timer-sec');
 
         brushSizeInput.addEventListener('input', (e) => {
             sizeValDisplay.innerText = e.target.value + 'px';
@@ -188,13 +226,21 @@
             window.addEventListener('resize', resizeCanvas);
             
             loadPixels();
-            subscribeToRealtime();
+            setupRealtimeAndPresence();
+            startSaveTimer();
         }
 
         function setTool(tool) {
             currentTool = tool;
             document.getElementById('brushBtn').classList.toggle('active', tool === 'brush');
             document.getElementById('eraserBtn').classList.toggle('active', tool === 'eraser');
+        }
+
+        function toggleLock() {
+            isLockedMode = !isLockedMode;
+            const btn = document.getElementById('lockToggleBtn');
+            btn.classList.toggle('active', isLockedMode);
+            btn.innerText = isLockedMode ? '🔒 Замок (Увімк)' : '🔓 Замок (Вимк)';
         }
 
         function getCoords(e) {
@@ -211,7 +257,7 @@
             };
         }
 
-        function drawBlock(startX, startY, size, color, author) {
+        function drawBlock(startX, startY, size, color, author, locked) {
             ctx.fillStyle = color;
             ctx.fillRect(startX, startY, size, size);
 
@@ -220,13 +266,14 @@
                     if (color === '#ffffff') {
                         delete pixelMap[`${i},${j}`];
                     } else {
-                        pixelMap[`${i},${j}`] = author;
+                        // Тепер зберігаємо і автора, і статус замка
+                        pixelMap[`${i},${j}`] = { author: author, locked: locked };
                     }
                 }
             }
         }
 
-        async function handlePaint(e) {
+        function handlePaint(e) {
             const coords = getCoords(e);
             const size = parseInt(brushSizeInput.value);
             
@@ -234,27 +281,27 @@
             const startY = coords.y - Math.floor(size / 2);
             const color = currentTool === 'eraser' ? '#ffffff' : colorPicker.value;
 
-            // Якщо ластік або вибраний білий колір
             if (currentTool === 'eraser' || color === '#ffffff') {
-                drawBlock(startX, startY, size, '#ffffff', null);
-
-                await supabaseClient.from('pixels')
-                    .delete()
-                    .gte('x', startX)
-                    .lte('x', startX + size)
-                    .gte('y', startY)
-                    .lte('y', startY + size);
-            } else {
-                drawBlock(startX, startY, size, color, currentUser);
-
-                const now = Date.now();
-                if (now - lastSaveTime > 20) {
-                    lastSaveTime = now;
-                    
-                    await supabaseClient.from('pixels').insert([
-                        { x: startX, y: startY, size: size, color: color, user_nickname: currentUser }
-                    ]);
+                // Розумний локальний ластік: стирає тільки те, що НЕ під замком
+                for (let i = startX; i < startX + size; i++) {
+                    for (let j = startY; j < startY + size; j++) {
+                        const p = pixelMap[`${i},${j}`];
+                        if (!p || !p.locked) {
+                            ctx.fillStyle = '#ffffff';
+                            ctx.fillRect(i, j, 1, 1);
+                            delete pixelMap[`${i},${j}`];
+                        }
+                    }
                 }
+                // Додаємо в чергу на видалення (база сама проігнорує is_locked = true)
+                pendingDeletes.push({ startX, startY, size });
+            } else {
+                drawBlock(startX, startY, size, color, currentUser, isLockedMode);
+                // Додаємо в чергу на збереження
+                pendingInserts.push({ 
+                    x: startX, y: startY, size: size, color: color, 
+                    user_nickname: currentUser, is_locked: isLockedMode 
+                });
             }
         }
 
@@ -270,13 +317,13 @@
             if (isDrawing || (e.touches && e.touches.length > 0)) return;
             const coords = getCoords(e);
             const key = `${coords.x},${coords.y}`;
-            const author = pixelMap[key];
+            const p = pixelMap[key];
 
-            if (author) {
+            if (p) {
                 tooltip.style.display = 'block';
                 tooltip.style.left = (e.clientX + 15) + 'px';
                 tooltip.style.top = (e.clientY + 15) + 'px';
-                tooltip.innerText = `Малював: ${author}`;
+                tooltip.innerText = `Малював: ${p.author}` + (p.locked ? ' 🔒' : '');
             } else {
                 tooltip.style.display = 'none';
             }
@@ -286,9 +333,12 @@
 
         function redrawEverything() {
             ctx.clearRect(0, 0, canvas.width, canvas.height); 
+            // Очищаємо карту пікселів перед перемальовкою
+            for (let key in pixelMap) delete pixelMap[key];
+            
             rawDataHistory.forEach(p => {
                 const s = p.size || 1;
-                drawBlock(p.x, p.y, s, p.color, p.user_nickname);
+                drawBlock(p.x, p.y, s, p.color, p.user_nickname, p.is_locked);
             });
         }
 
@@ -304,27 +354,127 @@
             }
         }
 
-        function subscribeToRealtime() {
-            supabaseClient.channel('public:pixels')
-                .on('postgres_changes', { event: '*', schema: 'public', table: 'pixels' }, payload => {
+        // --- ТАЙМЕР І ПАКЕТНЕ ЗБЕРЕЖЕННЯ ---
+        function startSaveTimer() {
+            setInterval(async () => {
+                saveCountdown--;
+                timerDisplay.innerText = saveCountdown;
+                
+                if (saveCountdown <= 0) {
+                    saveCountdown = 10; // Скидаємо таймер
                     
-                    if (payload.eventType === 'INSERT') {
-                        const p = payload.new;
-                        if (p.user_nickname !== currentUser) {
-                            rawDataHistory.push(p);
-                            const s = p.size || 1;
-                            drawBlock(p.x, p.y, s, p.color, p.user_nickname);
-                        }
-                    } else if (payload.eventType === 'DELETE') {
-                        const oldRow = payload.old;
-                        if (oldRow && oldRow.x !== undefined && oldRow.y !== undefined) {
-                            const s = oldRow.size || 1;
-                            drawBlock(oldRow.x, oldRow.y, s, '#ffffff', null);
-                        }
+                    // Відправляємо всі нові малюнки
+                    if (pendingInserts.length > 0) {
+                        const batch = [...pendingInserts];
+                        pendingInserts = [];
+                        await supabaseClient.from('pixels').insert(batch);
                     }
                     
-                })
-                .subscribe();
+                    // Відправляємо всі стирання (тільки там, де немає замка)
+                    if (pendingDeletes.length > 0) {
+                        const deletes = [...pendingDeletes];
+                        pendingDeletes = [];
+                        for (let d of deletes) {
+                            await supabaseClient.from('pixels')
+                                .delete()
+                                .gte('x', d.startX).lte('x', d.startX + d.size)
+                                .gte('y', d.startY).lte('y', d.startY + d.size)
+                                .eq('is_locked', false); // Важливо: не видаляємо замкнені!
+                        }
+                    }
+                }
+            }, 1000);
+        }
+
+        // --- СИСТЕМА ГОЛОСУВАННЯ ТА REALTIME ---
+        function setupRealtimeAndPresence() {
+            room = supabaseClient.channel('pixel_room', {
+                config: { presence: { key: currentUser } }
+            });
+
+            // Відстеження тих, хто онлайн
+            room.on('presence', { event: 'sync' }, () => {
+                const state = room.presenceState();
+                onlineUsers.clear();
+                Object.keys(state).forEach(id => {
+                    onlineUsers.add(state[id][0].user_nickname);
+                });
+                updateVoteUI();
+                checkClearCondition();
+            });
+
+            // Отримання голосів від інших
+            room.on('broadcast', { event: 'vote_clear' }, (payload) => {
+                votedUsers.add(payload.payload.user);
+                updateVoteUI();
+                checkClearCondition();
+            });
+
+            // Отримання малюнків у реальному часі
+            room.on('postgres_changes', { event: '*', schema: 'public', table: 'pixels' }, payload => {
+                if (payload.eventType === 'INSERT') {
+                    const p = payload.new;
+                    if (p.user_nickname !== currentUser) {
+                        rawDataHistory.push(p);
+                        const s = p.size || 1;
+                        drawBlock(p.x, p.y, s, p.color, p.user_nickname, p.is_locked);
+                    }
+                } else if (payload.eventType === 'DELETE') {
+                    const oldRow = payload.old;
+                    if (oldRow && oldRow.x !== undefined) {
+                        // Знаходимо і видаляємо з історії
+                        rawDataHistory = rawDataHistory.filter(item => !(item.x === oldRow.x && item.y === oldRow.y));
+                        // Перемальовуємо без стертого (щоб гарантувати правильність)
+                        redrawEverything();
+                    }
+                }
+            });
+
+            room.subscribe(async (status) => {
+                if (status === 'SUBSCRIBED') {
+                    await room.track({ user_nickname: currentUser });
+                }
+            });
+        }
+
+        function castVote() {
+            if (!myVote) {
+                myVote = true;
+                votedUsers.add(currentUser);
+                document.getElementById('voteBtn').classList.add('active');
+                room.send({ type: 'broadcast', event: 'vote_clear', payload: { user: currentUser } });
+                updateVoteUI();
+                checkClearCondition();
+            }
+        }
+
+        function updateVoteUI() {
+            // Рахуємо тільки голоси тих, хто досі онлайн
+            const activeVotes = [...votedUsers].filter(u => onlineUsers.has(u));
+            const total = onlineUsers.size || 1;
+            document.getElementById('voteBtn').innerText = `🧨 Стерти все (${activeVotes.length}/${total})`;
+        }
+
+        async function checkClearCondition() {
+            const activeVotes = [...votedUsers].filter(u => onlineUsers.has(u));
+            const total = onlineUsers.size || 1;
+            
+            // Якщо проголосували всі онлайн
+            if (activeVotes.length >= total && total > 0) {
+                // Очищаємо всю таблицю БД безпечним шляхом
+                await supabaseClient.from('pixels').delete().neq('size', -1);
+                
+                // Скидаємо голосування
+                votedUsers.clear();
+                myVote = false;
+                document.getElementById('voteBtn').classList.remove('active');
+                
+                // Очищаємо екран
+                rawDataHistory = [];
+                redrawEverything();
+                updateVoteUI();
+                alert("Усі проголосували! Полотно очищено 🧨");
+            }
         }
     </script>
 </body>
