@@ -134,10 +134,10 @@
             bottom: 10px;
             right: 15px;
             font-size: 11px;
-            color: rgba(255,255,255,0.25);
+            color: rgba(255,255,255,0.3);
             pointer-events: none;
             z-index: 10;
-            font-family: monospace;
+            font-family: sans-serif;
         }
     </style>
 </head>
@@ -166,7 +166,7 @@
         </div>
         
         <canvas id="canvas"></canvas>
-        <div id="save-timer">sync: <span id="timer-sec">0.5</span>s</div>
+        <div id="save-timer">Мережа: ⚡ Realtime P2P</div>
     </div>
 
     <div id="tooltip"></div>
@@ -185,7 +185,11 @@
         const pixelMap = {}; 
         let rawDataHistory = [];
         
-        // Буфери для ШВИДКОГО пакетного збереження (кожні 500мс)
+        // Буфери для надшвидкого обміну між гравцями (100мс)
+        let broadcastInserts = [];
+        let broadcastDeletes = [];
+
+        // Буфери для тихих фонових збережень у БД (2 секунди)
         let pendingInserts = [];
         let pendingDeletes = [];
 
@@ -201,7 +205,6 @@
         const colorPicker = document.getElementById('colorPicker');
         const brushSizeInput = document.getElementById('brushSize');
         const sizeValDisplay = document.getElementById('sizeVal');
-        const timerDisplay = document.getElementById('timer-sec');
 
         brushSizeInput.addEventListener('input', (e) => {
             sizeValDisplay.innerText = e.target.value + 'px';
@@ -227,7 +230,7 @@
             
             loadPixels();
             setupRealtimeAndPresence();
-            startFastSaveTimer();
+            startNetworkLoops();
         }
 
         function setTool(tool) {
@@ -251,10 +254,7 @@
                 clientX = e.touches[0].clientX;
                 clientY = e.touches[0].clientY;
             }
-            return {
-                x: Math.floor(clientX - rect.left),
-                y: Math.floor(clientY - rect.top)
-            };
+            return { x: Math.floor(clientX - rect.left), y: Math.floor(clientY - rect.top) };
         }
 
         function drawBlock(startX, startY, size, color, author, locked) {
@@ -275,24 +275,21 @@
         function handlePaint(e) {
             const coords = getCoords(e);
             const size = parseInt(brushSizeInput.value);
-            
             const startX = coords.x - Math.floor(size / 2);
             const startY = coords.y - Math.floor(size / 2);
             const color = currentTool === 'eraser' ? '#ffffff' : colorPicker.value;
 
-            // Тротлінг на клієнті для плавності ліній (15мс)
+            // Обмеження частоти зчитування для ідеальної плавності ліній (15мс)
             const now = Date.now();
             if (now - lastPaintTime < 15) return;
             lastPaintTime = now;
 
             if (currentTool === 'eraser' || color === '#ffffff') {
-                // Розумний ластік: можна стерти незамкнене АБО своє замкнене
                 let canDeleteAny = false;
                 
                 for (let i = startX; i < startX + size; i++) {
                     for (let j = startY; j < startY + size; j++) {
                         const p = pixelMap[`${i},${j}`];
-                        // Якщо пікселя нема, або він не замкнений, або автор — це ТИ
                         if (!p || !p.locked || p.author === currentUser) {
                             ctx.fillStyle = '#ffffff';
                             ctx.fillRect(i, j, 1, 1);
@@ -303,7 +300,9 @@
                 }
                 
                 if (canDeleteAny) {
-                    pendingDeletes.push({ startX, startY, size });
+                    const deleteAction = { startX, startY, size, user: currentUser };
+                    broadcastDeletes.push(deleteAction);
+                    pendingDeletes.push(deleteAction);
                 }
             } else {
                 drawBlock(startX, startY, size, color, currentUser, isLockedMode);
@@ -313,6 +312,7 @@
                     user_nickname: currentUser, is_locked: isLockedMode 
                 };
                 
+                broadcastInserts.push(newPixel);
                 pendingInserts.push(newPixel);
                 rawDataHistory.push(newPixel); 
             }
@@ -347,23 +347,19 @@
         function redrawEverything() {
             ctx.clearRect(0, 0, canvas.width, canvas.height); 
             for (let key in pixelMap) delete pixelMap[key];
-            
             rawDataHistory.forEach(p => {
-                const s = p.size || 1;
-                drawBlock(p.x, p.y, s, p.color, p.user_nickname, p.is_locked);
+                drawBlock(p.x, p.y, p.size || 1, p.color, p.user_nickname, p.is_locked);
             });
         }
 
         let redrawTimeout = null;
         function scheduleRedraw() {
             if (redrawTimeout) clearTimeout(redrawTimeout);
-            redrawTimeout = setTimeout(() => {
-                redrawEverything();
-            }, 30);
+            redrawTimeout = setTimeout(() => { redrawEverything(); }, 20);
         }
 
         async function loadPixels() {
-            const { data, error } = await supabaseClient.from('pixels')
+            const { data } = await supabaseClient.from('pixels')
                 .select('*')
                 .order('created_at', { ascending: true }) 
                 .limit(100000); 
@@ -374,34 +370,43 @@
             }
         }
 
-        // --- НАДШВИДКИЙ ТАЙМЕР ЗБЕРЕЖЕННЯ (КОЖНІ 0.5 СЕКУНДИ) ---
-        function startFastSaveTimer() {
+        // --- МЕРЕЖЕВІ ЦИКЛИ ТА СИНХРОНІЗАЦІЯ ---
+        function startNetworkLoops() {
+            // 1. НАДШВИДКИЙ цикл обміну між гравцями (100мс) - ТУТ НЕМАЄ ЗАПИТІВ ДО БД, ТОМУ ЦЕ НЕ ЛАГАЄ!
+            setInterval(() => {
+                if (broadcastInserts.length > 0) {
+                    room.send({ type: 'broadcast', event: 'p2p_draw', payload: broadcastInserts });
+                    broadcastInserts = [];
+                }
+                if (broadcastDeletes.length > 0) {
+                    room.send({ type: 'broadcast', event: 'p2p_erase', payload: broadcastDeletes });
+                    broadcastDeletes = [];
+                }
+            }, 100);
+
+            // 2. Тихий фоновий цикл збереження в БД (кожні 2 секунди)
             setInterval(async () => {
-                // Відправка вставок
                 if (pendingInserts.length > 0) {
                     const batch = [...pendingInserts];
                     pendingInserts = [];
                     await supabaseClient.from('pixels').insert(batch);
                 }
-                
-                // Відправка видалень
                 if (pendingDeletes.length > 0) {
                     const deletes = [...pendingDeletes];
                     pendingDeletes = [];
-                    
-                    await Promise.all(deletes.map(d => {
-                        // Запит видаляє пікселі в області, якщо вони незамкнені АБО якщо їх створив поточний користувач
-                        return supabaseClient.from('pixels')
+                    // Виконуємо видалення послідовно, щоб не перевантажувати пул підключень Supabase
+                    for (let d of deletes) {
+                        await supabaseClient.from('pixels')
                             .delete()
                             .gte('x', d.startX).lte('x', d.startX + d.size)
                             .gte('y', d.startY).lte('y', d.startY + d.size)
                             .or(`is_locked.eq.false,user_nickname.eq.${currentUser}`);
-                    }));
+                    }
                 }
-            }, 500); 
+            }, 2000);
         }
 
-        // --- REALTIME ТА ГОЛОСУВАННЯ ---
+        // --- REALTIME ТА ГОЛОСУВАННЯ (ОПТИМІЗОВАНО) ---
         function setupRealtimeAndPresence() {
             room = supabaseClient.channel('pixel_room', {
                 config: { presence: { key: currentUser } }
@@ -423,21 +428,51 @@
                 checkClearCondition();
             });
 
-            room.on('postgres_changes', { event: '*', schema: 'public', table: 'pixels' }, payload => {
-                if (payload.eventType === 'INSERT') {
-                    const p = payload.new;
-                    if (p.user_nickname !== currentUser) {
-                        rawDataHistory.push(p);
-                        const s = p.size || 1;
-                        drawBlock(p.x, p.y, s, p.color, p.user_nickname, p.is_locked);
+            // Слухаємо миттєве малювання інших гравців по P2P WebSockets
+            room.on('broadcast', { event: 'p2p_draw' }, (payload) => {
+                const pixels = payload.payload;
+                pixels.forEach(p => {
+                    rawDataHistory.push(p);
+                    drawBlock(p.x, p.y, p.size || 1, p.color, p.user_nickname, p.is_locked);
+                });
+            });
+
+            // Слухаємо миттєве стирання інших гравців по P2P WebSockets
+            room.on('broadcast', { event: 'p2p_erase' }, (payload) => {
+                const erases = payload.payload;
+                erases.forEach(d => {
+                    for (let i = d.startX; i < d.startX + d.size; i++) {
+                        for (let j = d.startY; j < d.startY + d.size; j++) {
+                            const p = pixelMap[`${i},${j}`];
+                            if (!p || !p.locked || p.author === d.user) {
+                                ctx.fillStyle = '#ffffff';
+                                ctx.fillRect(i, j, 1, 1);
+                                delete pixelMap[`${i},${j}`];
+                            }
+                        }
                     }
-                } else if (payload.eventType === 'DELETE') {
-                    const oldRow = payload.old;
-                    if (oldRow && oldRow.x !== undefined) {
-                        rawDataHistory = rawDataHistory.filter(item => !(item.x === oldRow.x && item.y === oldRow.y));
-                        scheduleRedraw();
-                    }
-                }
+                });
+
+                // Оптимізовано: чистимо історію масиву ОДИН раз для всього пакету, а не для кожного рядка окремо!
+                rawDataHistory = rawDataHistory.filter(item => {
+                    return !erases.some(d => {
+                        const hit = (item.x >= d.startX && item.x <= d.startX + d.size && item.y >= d.startY && item.y <= d.startY + d.size);
+                        if (hit && (!item.is_locked || item.user_nickname === d.user)) {
+                            return true;
+                        }
+                        return false;
+                    });
+                });
+            });
+
+            // Слухаємо повне очищення карти (вайп)
+            room.on('broadcast', { event: 'p2p_wipe' }, () => {
+                votedUsers.clear();
+                myVote = false;
+                document.getElementById('voteBtn').classList.remove('active');
+                rawDataHistory = [];
+                scheduleRedraw();
+                updateVoteUI();
             });
 
             room.subscribe(async (status) => {
@@ -469,8 +504,12 @@
             const total = onlineUsers.size || 1;
             
             if (activeVotes.length >= total && total > 0) {
+                // Очищаємо базу даних
                 await supabaseClient.from('pixels').delete().neq('size', -1);
                 
+                // Миттєво сповіщаємо всіх інших гравців сокетом, щоб очистити екран в 1 мілісекунду
+                room.send({ type: 'broadcast', event: 'p2p_wipe', payload: {} });
+
                 votedUsers.clear();
                 myVote = false;
                 document.getElementById('voteBtn').classList.remove('active');
