@@ -156,7 +156,7 @@
         let isDrawing = false;
         const pixelMap = {}; 
         let rawDataHistory = [];
-        let lastSaveTime = 0; // Для оптимізації відправки даних
+        let lastSaveTime = 0; 
 
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
@@ -211,13 +211,10 @@
             };
         }
 
-        // Нова функція, яка малює цілий блок (квадрат) одразу
         function drawBlock(startX, startY, size, color, author) {
             ctx.fillStyle = color;
             ctx.fillRect(startX, startY, size, size);
 
-            // Зберігаємо автора для кожної точки всередині блоку (щоб працював тултип)
-            // Локальна пам'ять JS витримає це легко, на відміну від бази даних
             for (let i = startX; i < startX + size; i++) {
                 for (let j = startY; j < startY + size; j++) {
                     if (color === '#ffffff') {
@@ -237,18 +234,27 @@
             const startY = coords.y - Math.floor(size / 2);
             const color = currentTool === 'eraser' ? '#ffffff' : colorPicker.value;
 
-            // Відмальовуємо локально
-            drawBlock(startX, startY, size, color, currentUser);
+            // Якщо ластік або вибраний білий колір
+            if (currentTool === 'eraser' || color === '#ffffff') {
+                drawBlock(startX, startY, size, '#ffffff', null);
 
-            // ОПТИМІЗАЦІЯ: Відправляємо в базу не частіше ніж 1 раз на 20мс (щоб не спамити при швидкому русі)
-            const now = Date.now();
-            if (now - lastSaveTime > 20) {
-                lastSaveTime = now;
-                
-                // ВІДПРАВЛЯЄМО ЛИШЕ 1 РЯДОК ЗАМІСТЬ 2500!
-                await supabaseClient.from('pixels').insert([
-                    { x: startX, y: startY, size: size, color: color, user_nickname: currentUser }
-                ]);
+                await supabaseClient.from('pixels')
+                    .delete()
+                    .gte('x', startX)
+                    .lte('x', startX + size)
+                    .gte('y', startY)
+                    .lte('y', startY + size);
+            } else {
+                drawBlock(startX, startY, size, color, currentUser);
+
+                const now = Date.now();
+                if (now - lastSaveTime > 20) {
+                    lastSaveTime = now;
+                    
+                    await supabaseClient.from('pixels').insert([
+                        { x: startX, y: startY, size: size, color: color, user_nickname: currentUser }
+                    ]);
+                }
             }
         }
 
@@ -280,19 +286,16 @@
 
         function redrawEverything() {
             ctx.clearRect(0, 0, canvas.width, canvas.height); 
-            // Відмальовуємо всю історію (починаючи зі старих, перекриваючи новими)
             rawDataHistory.forEach(p => {
-                // Якщо раптом старих записів немає size, ставимо 1
                 const s = p.size || 1;
                 drawBlock(p.x, p.y, s, p.color, p.user_nickname);
             });
         }
 
         async function loadPixels() {
-            // Завантажуємо максимум 100 000 останніх дій, щоб не перевантажити клієнт
             const { data, error } = await supabaseClient.from('pixels')
                 .select('*')
-                .order('created_at', { ascending: true }) // Малюємо в хронологічному порядку
+                .order('created_at', { ascending: true }) 
                 .limit(100000); 
 
             if (data) {
@@ -303,13 +306,23 @@
 
         function subscribeToRealtime() {
             supabaseClient.channel('public:pixels')
-                .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'pixels' }, payload => {
-                    const p = payload.new;
-                    if (p.user_nickname !== currentUser) {
-                        rawDataHistory.push(p);
-                        const s = p.size || 1;
-                        drawBlock(p.x, p.y, s, p.color, p.user_nickname);
+                .on('postgres_changes', { event: '*', schema: 'public', table: 'pixels' }, payload => {
+                    
+                    if (payload.eventType === 'INSERT') {
+                        const p = payload.new;
+                        if (p.user_nickname !== currentUser) {
+                            rawDataHistory.push(p);
+                            const s = p.size || 1;
+                            drawBlock(p.x, p.y, s, p.color, p.user_nickname);
+                        }
+                    } else if (payload.eventType === 'DELETE') {
+                        const oldRow = payload.old;
+                        if (oldRow && oldRow.x !== undefined && oldRow.y !== undefined) {
+                            const s = oldRow.size || 1;
+                            drawBlock(oldRow.x, oldRow.y, s, '#ffffff', null);
+                        }
                     }
+                    
                 })
                 .subscribe();
         }
