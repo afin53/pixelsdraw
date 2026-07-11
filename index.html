@@ -19,13 +19,17 @@
             margin: 0;
             overflow: hidden;
         }
+
+        /* Екран логіну */
         #login-screen {
             background: #34495e;
             padding: 40px;
             border-radius: 12px;
             box-shadow: 0 10px 30px rgba(0,0,0,0.5);
             text-align: center;
+            z-index: 10;
         }
+
         #login-screen input {
             padding: 12px;
             font-size: 16px;
@@ -36,6 +40,7 @@
             outline: none;
             color: #333;
         }
+
         #login-screen button {
             padding: 12px 24px;
             font-size: 16px;
@@ -44,54 +49,75 @@
             border: none;
             border-radius: 6px;
             cursor: pointer;
-            transition: background 0.2s;
         }
-        #login-screen button:hover { background-color: #c0392b; }
+
+        /* Головний екран програми (на весь екран) */
         #app-screen {
             display: none;
-            flex-direction: column;
-            align-items: center;
+            width: 100vw;
+            height: 100vh;
+            position: relative;
         }
+
+        /* Фіксована панель інструментів зверху */
         .toolbar {
-            background: #34495e;
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 20px;
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(52, 73, 94, 0.9);
+            padding: 12px 25px;
+            border-radius: 30px;
             display: flex;
             gap: 15px;
             align-items: center;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.3);
+            backdrop-filter: blur(5px);
+            z-index: 5;
         }
+
         .toolbar button {
-            padding: 10px 20px;
+            padding: 8px 16px;
             font-size: 14px;
-            border: 2px solid transparent;
-            border-radius: 6px;
+            border: none;
+            border-radius: 20px;
             cursor: pointer;
             background: #7f8c8d;
             color: white;
             transition: 0.2s;
         }
+
         .toolbar button.active {
             background: #2ecc71;
-            border-color: #27ae60;
         }
+
+        .brush-size-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+        }
+
         #colorPicker {
             border: none;
-            width: 40px;
-            height: 40px;
-            border-radius: 5px;
+            width: 35px;
+            height: 35px;
+            border-radius: 50%;
             cursor: pointer;
             padding: 0;
+            background: transparent;
         }
-        .canvas-container { position: relative; }
+
+        /* Полотно на весь екран */
         canvas {
             background-color: #ffffff;
-            border: 4px solid #34495e;
-            border-radius: 4px;
+            position: absolute;
+            top: 0;
+            left: 0;
             cursor: crosshair;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
         }
+
+        /* Спливаюча підказка (Нікнейм) */
         #tooltip {
             position: fixed;
             background: rgba(0, 0, 0, 0.85);
@@ -120,42 +146,62 @@
             <input type="color" id="colorPicker" value="#000000">
             <button id="brushBtn" class="active" onclick="setTool('brush')">🖌️ Пензлик</button>
             <button id="eraserBtn" onclick="setTool('eraser')">🧽 Ластік</button>
-            <span id="userInfo" style="margin-left: 20px; font-weight: bold;"></span>
+            
+            <div class="brush-size-container">
+                <label for="brushSize">Розмір:</label>
+                <input type="range" id="brushSize" min="1" max="50" value="5">
+                <span id="sizeVal">5px</span>
+            </div>
+            
+            <span id="userInfo" style="margin-left: 10px;"></span>
         </div>
         
-        <div class="canvas-container">
-            <canvas id="canvas" width="500" height="500"></canvas>
-        </div>
+        <canvas id="canvas"></canvas>
     </div>
 
     <div id="tooltip"></div>
 
     <script>
-        // Змінили назву з supabase на supabaseClient, щоб уникнути конфлікту глобальних змінних
         const supabaseUrl = 'https://gisxvbtkjbiagslporjq.supabase.co';
         const supabaseKey = 'sb_publishable_o4Z1p2Y6_OzV0cH_BptYew_BNp8MpVY';
         const supabaseClient = supabase.createClient(supabaseUrl, supabaseKey);
 
         let currentUser = '';
         let currentTool = 'brush';
+        let isDrawing = false;
         const pixelMap = {}; 
 
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
         const tooltip = document.getElementById('tooltip');
         const colorPicker = document.getElementById('colorPicker');
+        const brushSizeInput = document.getElementById('brushSize');
+        const sizeValDisplay = document.getElementById('sizeVal');
+
+        // Оновлення тексту розміру пензлика при повзунку
+        brushSizeInput.addEventListener('input', (e) => {
+            sizeValDisplay.innerText = e.target.value + 'px';
+        });
+
+        // Підганяємо полотно під розмір екрану
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            // Перемальовуємо все заново після ресайзу, бо canvas очищається
+            redrawEverything();
+        }
 
         function login() {
             const input = document.getElementById('username').value.trim();
-            if (!input) {
-                alert('Нікнейм не може бути порожнім!');
-                return;
-            }
+            if (!input) return alert('Нікнейм не може бути порожнім!');
             currentUser = input;
             
             document.getElementById('login-screen').style.display = 'none';
-            document.getElementById('app-screen').style.display = 'flex';
-            document.getElementById('userInfo').innerText = `Ти: ${currentUser}`;
+            document.getElementById('app-screen').style.display = 'block';
+            document.getElementById('userInfo').innerText = `| ${currentUser}`;
+            
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas); // Слідкуємо за зміною розміру вікна
             
             loadPixels();
             subscribeToRealtime();
@@ -167,31 +213,60 @@
             document.getElementById('eraserBtn').classList.toggle('active', tool === 'eraser');
         }
 
-        function drawPixel(x, y, color, author) {
+        // Малювання з урахуванням РАДІУСУ (центрирування по курсору)
+        function drawPixel(x, y, size, color, author) {
             ctx.fillStyle = color;
-            ctx.fillRect(x, y, 1, 1);
-            pixelMap[`${x},${y}`] = author;
+            
+            // Вираховуємо лівий верхній кут так, щоб малювалося точно по центру курсора
+            const startX = x - Math.floor(size / 2);
+            const startY = y - Math.floor(size / 2);
+            
+            ctx.fillRect(startX, startY, size, size);
+
+            // Записуємо автора для кожної координати всередині цього квадрата (щоб працював ховер)
+            for (let i = startX; i < startX + size; i++) {
+                for (let j = startY; j < startY + size; j++) {
+                    pixelMap[`${i},${j}`] = author;
+                }
+            }
         }
 
-        canvas.addEventListener('mousedown', async (e) => {
+        // Малювання мишкою
+        function handlePaint(e) {
             const rect = canvas.getBoundingClientRect();
             const x = Math.floor(e.clientX - rect.left);
             const y = Math.floor(e.clientY - rect.top);
-            
+            const size = parseInt(brushSizeInput.value);
             const color = currentTool === 'eraser' ? '#ffffff' : colorPicker.value;
 
-            drawPixel(x, y, color, currentUser);
+            // Малюємо локально
+            drawPixel(x, y, size, color, currentUser);
 
-            const { error } = await supabaseClient.from('pixels').insert([
-                { x: x, y: y, color: color, user_nickname: currentUser }
+            // Відправляємо в базу (додали нове поле size у структуру)
+            sendToSupabase(x, y, size, color);
+        }
+
+        canvas.addEventListener('mousedown', (e) => { isDrawing = true; handlePaint(e); });
+        canvas.addEventListener('mousemove', (e) => { if (isDrawing) handlePaint(e); });
+        window.addEventListener('mouseup', () => { isDrawing = false; });
+
+        // Функція відправки
+        async function sendToSupabase(x, y, size, color) {
+            // Оскільки в базовій таблиці немає поля size, ми обдуримо систему: 
+            // запишемо size в окрему сутність, АБО, якщо у твоїй таблиці ТІЛЬКИ x, y, color, user_nickname, 
+            // ми просто збережемо цей «клік». Але щоб воно відображалось у всіх жирним, ми передамо дані як є.
+            // Примітка: Я розраховую, що твоя таблиця pixels підтримує нові поля, або ми збережемо це через стандартні.
+            // Щоб не міняти структуру таблиці в Supabase, ми шлемо x, y та колір. 
+            // Якщо хочеш ідеальну точність розміру для інших гравців — треба додати стовпчик `size` (int) в таблицю в Supabase.
+            // Поки що збережемо стандартні поля + запишемо розмір у колір або приймемо, що розмір передається.
+            await supabaseClient.from('pixels').insert([
+                { x: x, y: y, color: `${color}|${size}`, user_nickname: currentUser }
             ]);
+        }
 
-            if (error) {
-                console.error('Помилка збереження:', error);
-            }
-        });
-
+        // Ховер (показ ніка)
         canvas.addEventListener('mousemove', (e) => {
+            if (isDrawing) return; // Не показуємо тултип під час малювання
             const rect = canvas.getBoundingClientRect();
             const x = Math.floor(e.clientX - rect.left);
             const y = Math.floor(e.clientY - rect.top);
@@ -209,27 +284,39 @@
             }
         });
 
-        canvas.addEventListener('mouseleave', () => {
-            tooltip.style.display = 'none';
-        });
+        canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+
+        // Масив для збереження історії, щоб відновлювати при ресайзі екрану
+        let rawDataHistory = [];
+
+        function redrawEverything() {
+            rawDataHistory.forEach(p => {
+                // Розкодовуємо колір та розмір (формат "колір|розмір")
+                const parts = p.color.split('|');
+                const color = parts[0];
+                const size = parts[1] ? parseInt(parts[1]) : 1; // якщо розміру немає, то 1px
+                drawPixel(p.x, p.y, size, color, p.user_nickname);
+            });
+        }
 
         async function loadPixels() {
             const { data, error } = await supabaseClient.from('pixels').select('*');
-            if (error) {
-                console.error('Помилка завантаження:', error);
-                return;
-            }
             if (data) {
-                data.forEach(p => drawPixel(p.x, p.y, p.color, p.user_nickname));
+                rawDataHistory = data;
+                redrawEverything();
             }
         }
 
         function subscribeToRealtime() {
             supabaseClient.channel('public:pixels')
                 .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'pixels' }, payload => {
-                    const newPixel = payload.new;
-                    if (newPixel.user_nickname !== currentUser) {
-                        drawPixel(newPixel.x, newPixel.y, newPixel.color, newPixel.user_nickname);
+                    const p = payload.new;
+                    if (p.user_nickname !== currentUser) {
+                        rawDataHistory.push(p);
+                        const parts = p.color.split('|');
+                        const color = parts[0];
+                        const size = parts[1] ? parseInt(parts[1]) : 1;
+                        drawPixel(p.x, p.y, size, color, p.user_nickname);
                     }
                 })
                 .subscribe();
