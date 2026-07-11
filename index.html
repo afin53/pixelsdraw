@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>pixel for world - Optimization</title>
+    <title>pixel for world - Voice & Lock Update</title>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         body {
@@ -69,7 +69,7 @@
             flex-wrap: wrap;
             justify-content: center;
             width: 95%;
-            max-width: 800px;
+            max-width: 900px;
         }
         .toolbar button {
             padding: 8px 12px;
@@ -84,16 +84,17 @@
         .toolbar button.active {
             background: #2ecc71;
         }
-        .toolbar button.locked-btn.active {
+        .toolbar button.locked-btn.active, .toolbar button.cooldown-btn {
             background: #f1c40f;
             color: #2c3e50;
         }
-        .toolbar button.vote-btn {
-            background: #c0392b;
-        }
-        .toolbar button.vote-btn.active {
+        .toolbar button.mic-recording {
             background: #e74c3c;
             box-shadow: 0 0 10px #e74c3c;
+            animation: pulse 1s infinite;
+        }
+        .toolbar button.vote-btn {
+            background: #c0392b;
         }
         .brush-size-container {
             display: flex;
@@ -138,6 +139,25 @@
             pointer-events: none;
             z-index: 10;
         }
+        #voice-toast {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #3498db;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 20px;
+            font-weight: bold;
+            display: none;
+            z-index: 100;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.5);
+        }
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
     </style>
 </head>
 <body>
@@ -160,12 +180,15 @@
                 <span id="sizeVal">5px</span>
             </div>
             
-            <button id="voteBtn" class="vote-btn" onclick="castVote()">🧨 Стерти все (0/0)</button>
+            <button id="undoBtn" onclick="undoAction()">↩️ Скасувати</button>
+            <button id="micBtn" onclick="toggleVoice()">🎙️ Голосуха (Готовий)</button>
+            <button id="voteBtn" class="vote-btn" onclick="castVote()">🧨 (0/0)</button>
             <span id="userInfo" style="font-weight: bold; margin-left: 5px;"></span>
         </div>
         
         <canvas id="canvas"></canvas>
-        <div id="save-timer">Супа: 🛡️ Дедуплікація увімкнена</div>
+        <div id="save-timer">Супа: 🛡️ Оптимізація + Войс</div>
+        <div id="voice-toast">🔊 Хтось говорить...</div>
     </div>
 
     <div id="tooltip"></div>
@@ -186,15 +209,22 @@
         
         const pixelMap = {}; 
         let rawDataHistory = [];
+        let undoStack = []; // Історія для кнопки "Скасувати"
         
         let broadcastQueue = [];
-        // МАГІЯ: Використовуємо Map, щоб відкидати дублікати координат для Супи
         let dbInsertMap = new Map(); 
 
         let room;
         let onlineUsers = new Set();
         let votedUsers = new Set();
         let myVote = false;
+
+        // Змінні для мікрофона
+        let mediaRecorder;
+        let audioChunks = [];
+        let isRecording = false;
+        let onMicCooldown = false;
+        let micTimeout;
 
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
@@ -290,12 +320,22 @@
             if (currentTool === 'eraser') {
                 color = '#ffffff';
                 targetLockState = false;
-
-                const centerPixel = pixelMap[`${coords.x},${coords.y}`];
-                if (centerPixel && centerPixel.locked && centerPixel.author !== currentUser) {
-                    return; 
-                }
             }
+
+            // ПОВНИЙ ФІКС ЗАМКА: Перевіряємо кожен піксель, на який наїжджає пензлик чи ластик
+            let hitForeignLock = false;
+            for (let i = startX; i < startX + size; i++) {
+                for (let j = startY; j < startY + size; j++) {
+                    const checkPixel = pixelMap[`${i},${j}`];
+                    if (checkPixel && checkPixel.locked && checkPixel.author !== currentUser) {
+                        hitForeignLock = true;
+                        break;
+                    }
+                }
+                if (hitForeignLock) break;
+            }
+            // Якщо напоролися на чужий замок - навіть не намагаємося малювати
+            if (hitForeignLock) return;
 
             drawBlock(startX, startY, size, color, currentUser, targetLockState);
             
@@ -304,15 +344,122 @@
                 user_nickname: currentUser, is_locked: targetLockState 
             };
             
-            // 1. Надсилаємо миттєво іншим гравцям по P2P
             broadcastQueue.push(actionData);
             
-            // 2. ЗАПИСУЄМО В MAP: Якщо ти проведеш по цьому місцю ще раз за 2 секунди, старий запис просто перезапишеться, а не додасться до черги!
             const coordKey = `${startX},${startY}`;
             dbInsertMap.set(coordKey, actionData);
             
             rawDataHistory.push(actionData);
+            undoStack.push(actionData); 
         }
+
+        // Логіка відміни
+        function undoAction() {
+            if (undoStack.length === 0) return;
+            const lastAction = undoStack.pop(); 
+            
+            const undoData = {
+                x: lastAction.x, y: lastAction.y, size: lastAction.size,
+                color: '#ffffff', user_nickname: currentUser, is_locked: false
+            };
+
+            drawBlock(undoData.x, undoData.y, undoData.size, undoData.color, undoData.user_nickname, undoData.is_locked);
+            broadcastQueue.push(undoData);
+            dbInsertMap.set(`${undoData.x},${undoData.y}`, undoData);
+        }
+
+        // ---------- ВОЙС ЧАТ ----------
+        async function initVoice() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                
+                mediaRecorder.ondataavailable = e => {
+                    audioChunks.push(e.data);
+                };
+
+                mediaRecorder.onstop = async () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    audioChunks = [];
+                    
+                    const reader = new FileReader();
+                    reader.readAsDataURL(audioBlob);
+                    reader.onloadend = () => {
+                        const base64Audio = reader.result;
+                        room.send({ type: 'broadcast', event: 'voice_msg', payload: { user: currentUser, audio: base64Audio } });
+                    };
+                };
+            } catch (err) {
+                alert("Потрібен дозвіл на мікрофон для голосового чату!");
+                console.error(err);
+            }
+        }
+
+        function toggleVoice() {
+            if (onMicCooldown) return;
+            
+            if (!mediaRecorder) {
+                initVoice().then(() => {
+                    if(mediaRecorder) startRecording();
+                });
+                return;
+            }
+
+            if (isRecording) {
+                stopRecording();
+            } else {
+                startRecording();
+            }
+        }
+
+        function startRecording() {
+            isRecording = true;
+            audioChunks = [];
+            mediaRecorder.start();
+            
+            const btn = document.getElementById('micBtn');
+            btn.innerText = '🔴 Запис... (Макс 30с)';
+            btn.classList.add('mic-recording');
+
+            // Автостоп через 30 секунд
+            micTimeout = setTimeout(() => {
+                if (isRecording) stopRecording();
+            }, 30000);
+        }
+
+        function stopRecording() {
+            isRecording = false;
+            clearTimeout(micTimeout);
+            mediaRecorder.stop();
+            
+            onMicCooldown = true;
+            let timeLeft = 300; // 5 хвилин
+            const btn = document.getElementById('micBtn');
+            btn.classList.remove('mic-recording');
+            btn.classList.add('cooldown-btn');
+            
+            const cdInterval = setInterval(() => {
+                timeLeft--;
+                const min = Math.floor(timeLeft / 60);
+                const sec = timeLeft % 60;
+                btn.innerText = `⏳ Кулдаун (${min}:${sec < 10 ? '0' : ''}${sec})`;
+                
+                if (timeLeft <= 0) {
+                    clearInterval(cdInterval);
+                    onMicCooldown = false;
+                    btn.classList.remove('cooldown-btn');
+                    btn.innerText = '🎙️ Голосуха (Готовий)';
+                }
+            }, 1000);
+        }
+
+        function showVoiceToast(user) {
+            const toast = document.getElementById('voice-toast');
+            toast.innerText = `🔊 Відтворюється голосуха від: ${user}`;
+            toast.style.display = 'block';
+            setTimeout(() => { toast.style.display = 'none'; }, 4000);
+        }
+        // ------------------------------
 
         canvas.addEventListener('mousedown', (e) => { isDrawing = true; lastX = null; lastY = null; handlePaint(e); });
         canvas.addEventListener('mousemove', (e) => { if (isDrawing) handlePaint(e); });
@@ -348,19 +495,11 @@
         }
 
         async function loadPixels() {
-            const { data } = await supabaseClient.from('pixels')
-                .select('*')
-                .order('created_at', { ascending: true }) 
-                .limit(100000); 
-
-            if (data) {
-                rawDataHistory = data;
-                redrawEverything();
-            }
+            const { data } = await supabaseClient.from('pixels').select('*').order('created_at', { ascending: true }).limit(100000); 
+            if (data) { rawDataHistory = data; redrawEverything(); }
         }
 
         function startNetworkLoops() {
-            // Швидкісні P2P сокети (60мс) - візуально літає
             setInterval(() => {
                 if (broadcastQueue.length > 0) {
                     room.send({ type: 'broadcast', event: 'p2p_action', payload: broadcastQueue });
@@ -368,22 +507,14 @@
                 }
             }, 60);
 
-            // Надійна та оптимізована Супа (2 секунди)
             setInterval(async () => {
                 if (dbInsertMap.size > 0) {
-                    // Конвертуємо наш очищений від дублікатів словник назад у масив
                     const batch = Array.from(dbInsertMap.values());
                     dbInsertMap.clear();
-
-                    // Розбиваємо на чанки по 400 пікселів, щоб Супа точно не вдавилася
                     const chunkSize = 400;
                     for (let i = 0; i < batch.length; i += chunkSize) {
-                        const chunk = batch.slice(i, i + chunkSize);
-                        try {
-                            await supabaseClient.from('pixels').insert(chunk);
-                        } catch (err) {
-                            console.error("Помилка збереження в Супу:", err);
-                        }
+                        try { await supabaseClient.from('pixels').insert(batch.slice(i, i + chunkSize)); } 
+                        catch (err) { console.error(err); }
                     }
                 }
             }, 2000);
@@ -397,9 +528,7 @@
             room.on('presence', { event: 'sync' }, () => {
                 const state = room.presenceState();
                 onlineUsers.clear();
-                Object.keys(state).forEach(id => {
-                    onlineUsers.add(state[id][0].user_nickname);
-                });
+                Object.keys(state).forEach(id => { onlineUsers.add(state[id][0].user_nickname); });
                 updateVoteUI();
                 checkClearCondition();
             });
@@ -418,37 +547,40 @@
                 });
             });
 
+            // Обробка вхідного голосового повідомлення
+            room.on('broadcast', { event: 'voice_msg' }, (payload) => {
+                const data = payload.payload;
+                if (data.user !== currentUser) {
+                    showVoiceToast(data.user);
+                    const audio = new Audio(data.audio);
+                    audio.play();
+                }
+            });
+
             room.on('broadcast', { event: 'p2p_wipe' }, () => {
-                votedUsers.clear();
-                myVote = false;
+                votedUsers.clear(); myVote = false;
                 document.getElementById('voteBtn').classList.remove('active');
-                rawDataHistory = [];
-                redrawEverything();
-                updateVoteUI();
+                rawDataHistory = []; redrawEverything(); updateVoteUI();
             });
 
             room.subscribe(async (status) => {
-                if (status === 'SUBSCRIBED') {
-                    await room.track({ user_nickname: currentUser });
-                }
+                if (status === 'SUBSCRIBED') await room.track({ user_nickname: currentUser });
             });
         }
 
         function castVote() {
             if (!myVote) {
-                myVote = true;
-                votedUsers.add(currentUser);
+                myVote = true; votedUsers.add(currentUser);
                 document.getElementById('voteBtn').classList.add('active');
                 room.send({ type: 'broadcast', event: 'vote_clear', payload: { user: currentUser } });
-                updateVoteUI();
-                checkClearCondition();
+                updateVoteUI(); checkClearCondition();
             }
         }
 
         function updateVoteUI() {
             const activeVotes = [...votedUsers].filter(u => onlineUsers.has(u));
             const total = onlineUsers.size || 1;
-            document.getElementById('voteBtn').innerText = `🧨 Стерти все (${activeVotes.length}/${total})`;
+            document.getElementById('voteBtn').innerText = `🧨 (${activeVotes.length}/${total})`;
         }
 
         async function checkClearCondition() {
@@ -458,14 +590,9 @@
             if (activeVotes.length >= total && total > 0) {
                 await supabaseClient.from('pixels').delete().neq('size', -1);
                 room.send({ type: 'broadcast', event: 'p2p_wipe', payload: {} });
-
-                votedUsers.clear();
-                myVote = false;
+                votedUsers.clear(); myVote = false;
                 document.getElementById('voteBtn').classList.remove('active');
-                
-                rawDataHistory = [];
-                redrawEverything();
-                updateVoteUI();
+                rawDataHistory = []; redrawEverything(); updateVoteUI();
                 alert("Усі проголосували! Полотно очищено 🧨");
             }
         }
