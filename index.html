@@ -2,14 +2,12 @@
 <html lang="uk">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Pixel Art Reddit Community</title>
-    
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    
     <style>
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: 'Segoe UI', sans-serif;
             background-color: #2c3e50;
             color: #ecf0f1;
             display: flex;
@@ -19,8 +17,6 @@
             margin: 0;
             overflow: hidden;
         }
-
-        /* Екран логіну */
         #login-screen {
             background: #34495e;
             padding: 40px;
@@ -29,18 +25,18 @@
             text-align: center;
             z-index: 10;
         }
-
         #login-screen input {
             padding: 12px;
             font-size: 16px;
             border: none;
             border-radius: 6px;
             width: 200px;
-            margin-right: 10px;
+            margin-bottom: 15px;
             outline: none;
-            color: #333;
+            display: block;
+            margin-left: auto;
+            margin-right: auto;
         }
-
         #login-screen button {
             padding: 12px 24px;
             font-size: 16px;
@@ -50,54 +46,49 @@
             border-radius: 6px;
             cursor: pointer;
         }
-
-        /* Головний екран програми (на весь екран) */
         #app-screen {
             display: none;
             width: 100vw;
             height: 100vh;
             position: relative;
         }
-
-        /* Фіксована панель інструментів зверху */
         .toolbar {
             position: absolute;
             top: 20px;
             left: 50%;
             transform: translateX(-50%);
             background: rgba(52, 73, 94, 0.9);
-            padding: 12px 25px;
+            padding: 10px 20px;
             border-radius: 30px;
             display: flex;
-            gap: 15px;
+            gap: 10px;
             align-items: center;
             box-shadow: 0 10px 25px rgba(0,0,0,0.3);
             backdrop-filter: blur(5px);
             z-index: 5;
+            flex-wrap: wrap;
+            justify-content: center;
+            width: 90%;
+            max-width: 600px;
         }
-
         .toolbar button {
-            padding: 8px 16px;
+            padding: 8px 12px;
             font-size: 14px;
             border: none;
             border-radius: 20px;
             cursor: pointer;
             background: #7f8c8d;
             color: white;
-            transition: 0.2s;
         }
-
         .toolbar button.active {
             background: #2ecc71;
         }
-
         .brush-size-container {
             display: flex;
             align-items: center;
             gap: 8px;
             font-size: 14px;
         }
-
         #colorPicker {
             border: none;
             width: 35px;
@@ -105,19 +96,16 @@
             border-radius: 50%;
             cursor: pointer;
             padding: 0;
-            background: transparent;
         }
-
-        /* Полотно на весь екран */
         canvas {
             background-color: #ffffff;
             position: absolute;
             top: 0;
             left: 0;
             cursor: crosshair;
+            /* ВАЖЛИВО ДЛЯ ТЕЛЕФОНІВ: вимикає скрол і зум при малюванні */
+            touch-action: none; 
         }
-
-        /* Спливаюча підказка (Нікнейм) */
         #tooltip {
             position: fixed;
             background: rgba(0, 0, 0, 0.85);
@@ -128,7 +116,6 @@
             pointer-events: none;
             display: none;
             z-index: 9999;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
             white-space: nowrap;
         }
     </style>
@@ -148,12 +135,11 @@
             <button id="eraserBtn" onclick="setTool('eraser')">🧽 Ластік</button>
             
             <div class="brush-size-container">
-                <label for="brushSize">Розмір:</label>
                 <input type="range" id="brushSize" min="1" max="50" value="5">
                 <span id="sizeVal">5px</span>
             </div>
             
-            <span id="userInfo" style="margin-left: 10px;"></span>
+            <span id="userInfo" style="font-weight: bold; margin-left: 5px;"></span>
         </div>
         
         <canvas id="canvas"></canvas>
@@ -170,6 +156,7 @@
         let currentTool = 'brush';
         let isDrawing = false;
         const pixelMap = {}; 
+        let rawDataHistory = [];
 
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
@@ -178,16 +165,13 @@
         const brushSizeInput = document.getElementById('brushSize');
         const sizeValDisplay = document.getElementById('sizeVal');
 
-        // Оновлення тексту розміру пензлика при повзунку
         brushSizeInput.addEventListener('input', (e) => {
             sizeValDisplay.innerText = e.target.value + 'px';
         });
 
-        // Підганяємо полотно під розмір екрану
         function resizeCanvas() {
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
-            // Перемальовуємо все заново після ресайзу, бо canvas очищається
             redrawEverything();
         }
 
@@ -201,7 +185,7 @@
             document.getElementById('userInfo').innerText = `| ${currentUser}`;
             
             resizeCanvas();
-            window.addEventListener('resize', resizeCanvas); // Слідкуємо за зміною розміру вікна
+            window.addEventListener('resize', resizeCanvas);
             
             loadPixels();
             subscribeToRealtime();
@@ -213,68 +197,107 @@
             document.getElementById('eraserBtn').classList.toggle('active', tool === 'eraser');
         }
 
-        // Малювання з урахуванням РАДІУСУ (центрирування по курсору)
-        function drawPixel(x, y, size, color, author) {
-            ctx.fillStyle = color;
-            
-            // Вираховуємо лівий верхній кут так, щоб малювалося точно по центру курсора
-            const startX = x - Math.floor(size / 2);
-            const startY = y - Math.floor(size / 2);
-            
-            ctx.fillRect(startX, startY, size, size);
+        // Отримання координат для мишки ТА тачскріну
+        function getCoords(e) {
+            const rect = canvas.getBoundingClientRect();
+            let clientX = e.clientX;
+            let clientY = e.clientY;
 
-            // Записуємо автора для кожної координати всередині цього квадрата (щоб працював ховер)
-            for (let i = startX; i < startX + size; i++) {
-                for (let j = startY; j < startY + size; j++) {
-                    pixelMap[`${i},${j}`] = author;
+            // Якщо це дотик на телефоні
+            if (e.touches && e.touches.length > 0) {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            }
+
+            return {
+                x: Math.floor(clientX - rect.left),
+                y: Math.floor(clientY - rect.top)
+            };
+        }
+
+        function drawPixel(x, y, color, author) {
+            ctx.fillStyle = color;
+            ctx.fillRect(x, y, 1, 1);
+            pixelMap[`${x},${y}`] = author;
+        }
+
+        function clearPixelLocally(x, y) {
+            ctx.clearRect(x, y, 1, 1);
+            delete pixelMap[`${x},${y}`];
+        }
+
+        async function handlePaint(e) {
+            const coords = getCoords(e);
+            const size = parseInt(brushSizeInput.value);
+            
+            const startX = coords.x - Math.floor(size / 2);
+            const startY = coords.y - Math.floor(size / 2);
+            const endX = startX + size;
+            const endY = startY + size;
+
+            if (currentTool === 'eraser') {
+                // Очищаємо полотно локально
+                ctx.clearRect(startX, startY, size, size);
+                for (let i = startX; i < endX; i++) {
+                    for (let j = startY; j < endY; j++) {
+                        delete pixelMap[`${i},${j}`];
+                    }
+                }
+                
+                // Видаляємо блок пікселів з бази даних Supabase
+                await supabaseClient.from('pixels')
+                    .delete()
+                    .gte('x', startX)
+                    .lt('x', endX)
+                    .gte('y', startY)
+                    .lt('y', endY);
+
+            } else {
+                // Малювання пензликом
+                const color = colorPicker.value;
+                const rowsToInsert = [];
+
+                for (let i = startX; i < endX; i++) {
+                    for (let j = startY; j < endY; j++) {
+                        drawPixel(i, j, color, currentUser);
+                        rowsToInsert.push({ x: i, y: j, color: color, user_nickname: currentUser });
+                    }
+                }
+
+                if (rowsToInsert.length > 0) {
+                    const optimizedRows = rowsToInsert.slice(0, 50); 
+                    await supabaseClient.from('pixels').insert(optimizedRows);
                 }
             }
         }
 
-        // Малювання мишкою
-        function handlePaint(e) {
-            const rect = canvas.getBoundingClientRect();
-            const x = Math.floor(e.clientX - rect.left);
-            const y = Math.floor(e.clientY - rect.top);
-            const size = parseInt(brushSizeInput.value);
-            const color = currentTool === 'eraser' ? '#ffffff' : colorPicker.value;
-
-            // Малюємо локально
-            drawPixel(x, y, size, color, currentUser);
-
-            // Відправляємо в базу (додали нове поле size у структуру)
-            sendToSupabase(x, y, size, color);
-        }
-
+        // Обробники для МИШКИ
         canvas.addEventListener('mousedown', (e) => { isDrawing = true; handlePaint(e); });
         canvas.addEventListener('mousemove', (e) => { if (isDrawing) handlePaint(e); });
         window.addEventListener('mouseup', () => { isDrawing = false; });
 
-        // Функція відправки
-        async function sendToSupabase(x, y, size, color) {
-            // Оскільки в базовій таблиці немає поля size, ми обдуримо систему: 
-            // запишемо size в окрему сутність, АБО, якщо у твоїй таблиці ТІЛЬКИ x, y, color, user_nickname, 
-            // ми просто збережемо цей «клік». Але щоб воно відображалось у всіх жирним, ми передамо дані як є.
-            // Примітка: Я розраховую, що твоя таблиця pixels підтримує нові поля, або ми збережемо це через стандартні.
-            // Щоб не міняти структуру таблиці в Supabase, ми шлемо x, y та колір. 
-            // Якщо хочеш ідеальну точність розміру для інших гравців — треба додати стовпчик `size` (int) в таблицю в Supabase.
-            // Поки що збережемо стандартні поля + запишемо розмір у колір або приймемо, що розмір передається.
-            await supabaseClient.from('pixels').insert([
-                { x: x, y: y, color: `${color}|${size}`, user_nickname: currentUser }
-            ]);
-        }
+        // Обробники для ТЕЛЕФОНІВ (Сенсор)
+        canvas.addEventListener('touchstart', (e) => { 
+            e.preventDefault(); // Зупиняє скрол сторінки
+            isDrawing = true; 
+            handlePaint(e); 
+        }, { passive: false });
+        
+        canvas.addEventListener('touchmove', (e) => { 
+            e.preventDefault(); 
+            if (isDrawing) handlePaint(e); 
+        }, { passive: false });
+        
+        window.addEventListener('touchend', () => { isDrawing = false; });
 
-        // Ховер (показ ніка)
+        // Ховер (Тільки для ПК, на телефонах тултип не потрібен)
         canvas.addEventListener('mousemove', (e) => {
-            if (isDrawing) return; // Не показуємо тултип під час малювання
-            const rect = canvas.getBoundingClientRect();
-            const x = Math.floor(e.clientX - rect.left);
-            const y = Math.floor(e.clientY - rect.top);
-            const key = `${x},${y}`;
-            
+            if (isDrawing || (e.touches && e.touches.length > 0)) return;
+            const coords = getCoords(e);
+            const key = `${coords.x},${coords.y}`;
             const author = pixelMap[key];
 
-            if (author && author !== '#ffffff') {
+            if (author) {
                 tooltip.style.display = 'block';
                 tooltip.style.left = (e.clientX + 15) + 'px';
                 tooltip.style.top = (e.clientY + 15) + 'px';
@@ -286,16 +309,10 @@
 
         canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
 
-        // Масив для збереження історії, щоб відновлювати при ресайзі екрану
-        let rawDataHistory = [];
-
         function redrawEverything() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height); 
             rawDataHistory.forEach(p => {
-                // Розкодовуємо колір та розмір (формат "колір|розмір")
-                const parts = p.color.split('|');
-                const color = parts[0];
-                const size = parts[1] ? parseInt(parts[1]) : 1; // якщо розміру немає, то 1px
-                drawPixel(p.x, p.y, size, color, p.user_nickname);
+                drawPixel(p.x, p.y, p.color, p.user_nickname);
             });
         }
 
@@ -308,15 +325,24 @@
         }
 
         function subscribeToRealtime() {
+            // Тепер слухаємо ВСІ події: і INSERT, і DELETE
             supabaseClient.channel('public:pixels')
-                .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'pixels' }, payload => {
-                    const p = payload.new;
-                    if (p.user_nickname !== currentUser) {
-                        rawDataHistory.push(p);
-                        const parts = p.color.split('|');
-                        const color = parts[0];
-                        const size = parts[1] ? parseInt(parts[1]) : 1;
-                        drawPixel(p.x, p.y, size, color, p.user_nickname);
+                .on('postgres_changes', { event: '*', schema: 'public', table: 'pixels' }, payload => {
+                    
+                    if (payload.eventType === 'INSERT') {
+                        const p = payload.new;
+                        if (p.user_nickname !== currentUser) {
+                            rawDataHistory.push(p);
+                            drawPixel(p.x, p.y, p.color, p.user_nickname);
+                        }
+                    } 
+                    
+                    if (payload.eventType === 'DELETE') {
+                        const oldRow = payload.old;
+                        // Видаляємо чужий стираний піксель (якщо є координати)
+                        if (oldRow && oldRow.x !== undefined && oldRow.y !== undefined) {
+                            clearPixelLocally(oldRow.x, oldRow.y);
+                        }
                     }
                 })
                 .subscribe();
