@@ -133,11 +133,11 @@
             position: fixed;
             bottom: 10px;
             right: 15px;
-            font-size: 12px;
-            color: rgba(0,0,0,0.4);
+            font-size: 11px;
+            color: rgba(255,255,255,0.25);
             pointer-events: none;
             z-index: 10;
-            font-weight: bold;
+            font-family: monospace;
         }
     </style>
 </head>
@@ -166,7 +166,7 @@
         </div>
         
         <canvas id="canvas"></canvas>
-        <div id="save-timer">Збереження через: <span id="timer-sec">10</span>с</div>
+        <div id="save-timer">sync: <span id="timer-sec">0.5</span>s</div>
     </div>
 
     <div id="tooltip"></div>
@@ -180,15 +180,14 @@
         let currentTool = 'brush';
         let isDrawing = false;
         let isLockedMode = false;
-        let lastSaveTime = 0; // Для оптимізації і плавного малювання
+        let lastPaintTime = 0; 
         
         const pixelMap = {}; 
         let rawDataHistory = [];
         
-        // Буфери для пакетного збереження кожні 10 секунд
+        // Буфери для ШВИДКОГО пакетного збереження (кожні 500мс)
         let pendingInserts = [];
         let pendingDeletes = [];
-        let saveCountdown = 10;
 
         // Для системи голосування
         let room;
@@ -228,7 +227,7 @@
             
             loadPixels();
             setupRealtimeAndPresence();
-            startSaveTimer();
+            startFastSaveTimer();
         }
 
         function setTool(tool) {
@@ -281,42 +280,41 @@
             const startY = coords.y - Math.floor(size / 2);
             const color = currentTool === 'eraser' ? '#ffffff' : colorPicker.value;
 
+            // Тротлінг на клієнті для плавності ліній (15мс)
+            const now = Date.now();
+            if (now - lastPaintTime < 15) return;
+            lastPaintTime = now;
+
             if (currentTool === 'eraser' || color === '#ffffff') {
-                // Розумний локальний ластік: стирає тільки те, що НЕ під замком
+                // Розумний ластік: можна стерти незамкнене АБО своє замкнене
+                let canDeleteAny = false;
+                
                 for (let i = startX; i < startX + size; i++) {
                     for (let j = startY; j < startY + size; j++) {
                         const p = pixelMap[`${i},${j}`];
-                        if (!p || !p.locked) {
+                        // Якщо пікселя нема, або він не замкнений, або автор — це ТИ
+                        if (!p || !p.locked || p.author === currentUser) {
                             ctx.fillStyle = '#ffffff';
                             ctx.fillRect(i, j, 1, 1);
                             delete pixelMap[`${i},${j}`];
+                            canDeleteAny = true;
                         }
                     }
                 }
                 
-                // Тротлінг для видалення
-                const now = Date.now();
-                if (now - lastSaveTime > 30) {
-                    lastSaveTime = now;
+                if (canDeleteAny) {
                     pendingDeletes.push({ startX, startY, size });
                 }
             } else {
                 drawBlock(startX, startY, size, color, currentUser, isLockedMode);
                 
-                // Тротлінг (малюємо локально завжди, але в масив пушимо рідше, щоб не було лагів)
-                const now = Date.now();
-                if (now - lastSaveTime > 30) {
-                    lastSaveTime = now;
-                    const newPixel = { 
-                        x: startX, y: startY, size: size, color: color, 
-                        user_nickname: currentUser, is_locked: isLockedMode 
-                    };
-                    
-                    pendingInserts.push(newPixel);
-                    
-                    // ВАЖЛИВО: Одразу зберігаємо в локальну історію, щоб малюнок не пропадав!
-                    rawDataHistory.push(newPixel); 
-                }
+                const newPixel = { 
+                    x: startX, y: startY, size: size, color: color, 
+                    user_nickname: currentUser, is_locked: isLockedMode 
+                };
+                
+                pendingInserts.push(newPixel);
+                rawDataHistory.push(newPixel); 
             }
         }
 
@@ -348,7 +346,6 @@
 
         function redrawEverything() {
             ctx.clearRect(0, 0, canvas.width, canvas.height); 
-            // Очищаємо карту пікселів перед перемальовкою
             for (let key in pixelMap) delete pixelMap[key];
             
             rawDataHistory.forEach(p => {
@@ -357,13 +354,12 @@
             });
         }
 
-        // Запобіжник для перемальовування (щоб не лагало при масовому видаленні)
         let redrawTimeout = null;
         function scheduleRedraw() {
             if (redrawTimeout) clearTimeout(redrawTimeout);
             redrawTimeout = setTimeout(() => {
                 redrawEverything();
-            }, 50);
+            }, 30);
         }
 
         async function loadPixels() {
@@ -378,45 +374,39 @@
             }
         }
 
-        // --- ТАЙМЕР І ПАКЕТНЕ ЗБЕРЕЖЕННЯ ---
-        function startSaveTimer() {
+        // --- НАДШВИДКИЙ ТАЙМЕР ЗБЕРЕЖЕННЯ (КОЖНІ 0.5 СЕКУНДИ) ---
+        function startFastSaveTimer() {
             setInterval(async () => {
-                saveCountdown--;
-                timerDisplay.innerText = saveCountdown;
-                
-                if (saveCountdown <= 0) {
-                    saveCountdown = 10; // Скидаємо таймер
-                    
-                    // Відправляємо всі нові малюнки
-                    if (pendingInserts.length > 0) {
-                        const batch = [...pendingInserts];
-                        pendingInserts = [];
-                        await supabaseClient.from('pixels').insert(batch);
-                    }
-                    
-                    // Відправляємо всі стирання паралельно (дуже швидко)
-                    if (pendingDeletes.length > 0) {
-                        const deletes = [...pendingDeletes];
-                        pendingDeletes = [];
-                        await Promise.all(deletes.map(d => 
-                            supabaseClient.from('pixels')
-                                .delete()
-                                .gte('x', d.startX).lte('x', d.startX + d.size)
-                                .gte('y', d.startY).lte('y', d.startY + d.size)
-                                .eq('is_locked', false) // Не видаляємо замкнені!
-                        ));
-                    }
+                // Відправка вставок
+                if (pendingInserts.length > 0) {
+                    const batch = [...pendingInserts];
+                    pendingInserts = [];
+                    await supabaseClient.from('pixels').insert(batch);
                 }
-            }, 1000);
+                
+                // Відправка видалень
+                if (pendingDeletes.length > 0) {
+                    const deletes = [...pendingDeletes];
+                    pendingDeletes = [];
+                    
+                    await Promise.all(deletes.map(d => {
+                        // Запит видаляє пікселі в області, якщо вони незамкнені АБО якщо їх створив поточний користувач
+                        return supabaseClient.from('pixels')
+                            .delete()
+                            .gte('x', d.startX).lte('x', d.startX + d.size)
+                            .gte('y', d.startY).lte('y', d.startY + d.size)
+                            .or(`is_locked.eq.false,user_nickname.eq.${currentUser}`);
+                    }));
+                }
+            }, 500); 
         }
 
-        // --- СИСТЕМА ГОЛОСУВАННЯ ТА REALTIME ---
+        // --- REALTIME ТА ГОЛОСУВАННЯ ---
         function setupRealtimeAndPresence() {
             room = supabaseClient.channel('pixel_room', {
                 config: { presence: { key: currentUser } }
             });
 
-            // Відстеження тих, хто онлайн
             room.on('presence', { event: 'sync' }, () => {
                 const state = room.presenceState();
                 onlineUsers.clear();
@@ -427,14 +417,12 @@
                 checkClearCondition();
             });
 
-            // Отримання голосів від інших
             room.on('broadcast', { event: 'vote_clear' }, (payload) => {
                 votedUsers.add(payload.payload.user);
                 updateVoteUI();
                 checkClearCondition();
             });
 
-            // Отримання малюнків у реальному часі
             room.on('postgres_changes', { event: '*', schema: 'public', table: 'pixels' }, payload => {
                 if (payload.eventType === 'INSERT') {
                     const p = payload.new;
@@ -446,9 +434,7 @@
                 } else if (payload.eventType === 'DELETE') {
                     const oldRow = payload.old;
                     if (oldRow && oldRow.x !== undefined) {
-                        // Знаходимо і видаляємо з історії
                         rawDataHistory = rawDataHistory.filter(item => !(item.x === oldRow.x && item.y === oldRow.y));
-                        // Перемальовуємо без стертого плавно
                         scheduleRedraw();
                     }
                 }
