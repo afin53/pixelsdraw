@@ -153,7 +153,7 @@
         <div class="toolbar">
             <input type="color" id="colorPicker" value="#000000">
             <button id="brushBtn" class="active" onclick="setTool('brush')">🖌️ Пензлик</button>
-            <button id="eraserBtn" onclick="setTool('eraser')">🧽 Губочка</button>
+            <button id="eraserBtn" onclick="setTool('eraser')">🧽 Ластік</button>
             <button id="lockToggleBtn" class="locked-btn" onclick="toggleLock()">🔓 Замок (Вимк)</button>
             
             <div class="brush-size-container">
@@ -180,6 +180,7 @@
         let currentTool = 'brush';
         let isDrawing = false;
         let isLockedMode = false;
+        let lastSaveTime = 0; // Для оптимізації і плавного малювання
         
         const pixelMap = {}; 
         let rawDataHistory = [];
@@ -266,7 +267,6 @@
                     if (color === '#ffffff') {
                         delete pixelMap[`${i},${j}`];
                     } else {
-                        // Тепер зберігаємо і автора, і статус замка
                         pixelMap[`${i},${j}`] = { author: author, locked: locked };
                     }
                 }
@@ -293,15 +293,30 @@
                         }
                     }
                 }
-                // Додаємо в чергу на видалення (база сама проігнорує is_locked = true)
-                pendingDeletes.push({ startX, startY, size });
+                
+                // Тротлінг для видалення
+                const now = Date.now();
+                if (now - lastSaveTime > 30) {
+                    lastSaveTime = now;
+                    pendingDeletes.push({ startX, startY, size });
+                }
             } else {
                 drawBlock(startX, startY, size, color, currentUser, isLockedMode);
-                // Додаємо в чергу на збереження
-                pendingInserts.push({ 
-                    x: startX, y: startY, size: size, color: color, 
-                    user_nickname: currentUser, is_locked: isLockedMode 
-                });
+                
+                // Тротлінг (малюємо локально завжди, але в масив пушимо рідше, щоб не було лагів)
+                const now = Date.now();
+                if (now - lastSaveTime > 30) {
+                    lastSaveTime = now;
+                    const newPixel = { 
+                        x: startX, y: startY, size: size, color: color, 
+                        user_nickname: currentUser, is_locked: isLockedMode 
+                    };
+                    
+                    pendingInserts.push(newPixel);
+                    
+                    // ВАЖЛИВО: Одразу зберігаємо в локальну історію, щоб малюнок не пропадав!
+                    rawDataHistory.push(newPixel); 
+                }
             }
         }
 
@@ -342,6 +357,15 @@
             });
         }
 
+        // Запобіжник для перемальовування (щоб не лагало при масовому видаленні)
+        let redrawTimeout = null;
+        function scheduleRedraw() {
+            if (redrawTimeout) clearTimeout(redrawTimeout);
+            redrawTimeout = setTimeout(() => {
+                redrawEverything();
+            }, 50);
+        }
+
         async function loadPixels() {
             const { data, error } = await supabaseClient.from('pixels')
                 .select('*')
@@ -370,17 +394,17 @@
                         await supabaseClient.from('pixels').insert(batch);
                     }
                     
-                    // Відправляємо всі стирання (тільки там, де немає замка)
+                    // Відправляємо всі стирання паралельно (дуже швидко)
                     if (pendingDeletes.length > 0) {
                         const deletes = [...pendingDeletes];
                         pendingDeletes = [];
-                        for (let d of deletes) {
-                            await supabaseClient.from('pixels')
+                        await Promise.all(deletes.map(d => 
+                            supabaseClient.from('pixels')
                                 .delete()
                                 .gte('x', d.startX).lte('x', d.startX + d.size)
                                 .gte('y', d.startY).lte('y', d.startY + d.size)
-                                .eq('is_locked', false); // Важливо: не видаляємо замкнені!
-                        }
+                                .eq('is_locked', false) // Не видаляємо замкнені!
+                        ));
                     }
                 }
             }, 1000);
@@ -424,8 +448,8 @@
                     if (oldRow && oldRow.x !== undefined) {
                         // Знаходимо і видаляємо з історії
                         rawDataHistory = rawDataHistory.filter(item => !(item.x === oldRow.x && item.y === oldRow.y));
-                        // Перемальовуємо без стертого (щоб гарантувати правильність)
-                        redrawEverything();
+                        // Перемальовуємо без стертого плавно
+                        scheduleRedraw();
                     }
                 }
             });
@@ -449,7 +473,6 @@
         }
 
         function updateVoteUI() {
-            // Рахуємо тільки голоси тих, хто досі онлайн
             const activeVotes = [...votedUsers].filter(u => onlineUsers.has(u));
             const total = onlineUsers.size || 1;
             document.getElementById('voteBtn').innerText = `🧨 Стерти все (${activeVotes.length}/${total})`;
@@ -459,19 +482,15 @@
             const activeVotes = [...votedUsers].filter(u => onlineUsers.has(u));
             const total = onlineUsers.size || 1;
             
-            // Якщо проголосували всі онлайн
             if (activeVotes.length >= total && total > 0) {
-                // Очищаємо всю таблицю БД безпечним шляхом
                 await supabaseClient.from('pixels').delete().neq('size', -1);
                 
-                // Скидаємо голосування
                 votedUsers.clear();
                 myVote = false;
                 document.getElementById('voteBtn').classList.remove('active');
                 
-                // Очищаємо екран
                 rawDataHistory = [];
-                redrawEverything();
+                scheduleRedraw();
                 updateVoteUI();
                 alert("Усі проголосували! Полотно очищено 🧨");
             }
