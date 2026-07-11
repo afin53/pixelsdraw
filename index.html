@@ -2,10 +2,12 @@
 <html lang="uk">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>pixel for world - Optimization</title>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
+        :root { --accent: #2ecc71; }
+        * { box-sizing: border-box; }
         body {
             font-family: 'Segoe UI', sans-serif;
             background-color: #2c3e50;
@@ -69,7 +71,7 @@
             flex-wrap: wrap;
             justify-content: center;
             width: 95%;
-            max-width: 800px;
+            max-width: 900px;
         }
         .toolbar button {
             padding: 8px 12px;
@@ -81,8 +83,10 @@
             color: white;
             transition: 0.2s;
         }
+        .toolbar button:hover { filter: brightness(1.1); }
+        .toolbar button:disabled { opacity: 0.4; cursor: not-allowed; }
         .toolbar button.active {
-            background: #2ecc71;
+            background: var(--accent);
         }
         .toolbar button.locked-btn.active {
             background: #f1c40f;
@@ -115,8 +119,9 @@
             top: 0;
             left: 0;
             cursor: crosshair;
-            touch-action: none; 
+            touch-action: none;
         }
+        canvas.panning { cursor: grabbing; }
         #tooltip {
             position: fixed;
             background: rgba(0, 0, 0, 0.85);
@@ -128,6 +133,22 @@
             display: none;
             z-index: 9999;
             white-space: nowrap;
+        }
+        #hud {
+            position: fixed;
+            bottom: 10px;
+            left: 15px;
+            font-size: 12px;
+            color: rgba(255,255,255,0.55);
+            pointer-events: none;
+            z-index: 10;
+            line-height: 1.5;
+        }
+        #hud kbd {
+            background: rgba(255,255,255,0.12);
+            border-radius: 4px;
+            padding: 1px 5px;
+            font-family: inherit;
         }
         #save-timer {
             position: fixed;
@@ -154,17 +175,24 @@
             <button id="brushBtn" class="active" onclick="setTool('brush')">🖌️ Пензлик</button>
             <button id="eraserBtn" onclick="setTool('eraser')">🧽 Ластік</button>
             <button id="lockToggleBtn" class="locked-btn" onclick="toggleLock()">🔓 Замок (Вимк)</button>
-            
+
             <div class="brush-size-container">
                 <input type="range" id="brushSize" min="1" max="50" value="5">
                 <span id="sizeVal">5px</span>
             </div>
-            
+
+            <button id="undoBtn" onclick="undo()" disabled title="Скасувати (Ctrl+Z)">↶ Назад</button>
+            <button id="resetViewBtn" onclick="resetView()" title="Скинути масштаб (0)">🎯 Центр</button>
+            <button id="saveBtn" onclick="exportPNG()" title="Зберегти PNG (S)">💾 PNG</button>
             <button id="voteBtn" class="vote-btn" onclick="castVote()">🧨 Стерти все (0/0)</button>
             <span id="userInfo" style="font-weight: bold; margin-left: 5px;"></span>
         </div>
-        
+
         <canvas id="canvas"></canvas>
+        <div id="hud">
+            <div id="zoomInfo">100%</div>
+            <div><kbd>колесо</kbd> зум · <kbd>Space</kbd>/середня кнопка — рух · <kbd>B</kbd>/<kbd>E</kbd> інструмент · <kbd>[</kbd> <kbd>]</kbd> розмір</div>
+        </div>
         <div id="save-timer">Супа: 🛡️ Дедуплікація увімкнена</div>
     </div>
 
@@ -175,26 +203,40 @@
         const supabaseKey = 'sb_publishable_o4Z1p2Y6_OzV0cH_BptYew_BNp8MpVY';
         const supabaseClient = supabase.createClient(supabaseUrl, supabaseKey);
 
+        const ERASE_COLOR = '#ffffff'; // білим кольором ми стираємо
+
         let currentUser = '';
         let currentTool = 'brush';
         let isDrawing = false;
         let isLockedMode = false;
-        
-        let lastX = null;
-        let lastY = null;
-        let lastPaintTime = 0;
-        
-        const pixelMap = {}; 
-        let rawDataHistory = [];
-        
+
+        // де ми малювали останній раз, щоб з'єднати точки в лінію
+        let lastCenterX = null;
+        let lastCenterY = null;
+
+        // хто намалював кожну клітинку (щоб показати підказку при наведенні)
+        const pixelMap = {};
+
         let broadcastQueue = [];
         // МАГІЯ: Використовуємо Map, щоб відкидати дублікати координат для Супи
-        let dbInsertMap = new Map(); 
+        let dbInsertMap = new Map();
+
+        // щоб можна було відмінити свої мазки (кнопка "Назад")
+        let currentStroke = null;
+        const undoStack = [];
+        const UNDO_LIMIT = 25;
+        const STROKE_BLOCK_CAP = 6000;
 
         let room;
         let onlineUsers = new Set();
         let votedUsers = new Set();
         let myVote = false;
+        let isClearing = false;
+
+        // курсори інших гравців, щоб бачити, де хто зараз
+        const remoteCursors = new Map();
+        let lastCursorSent = 0;
+        let lastCursorScreen = { x: 0, y: 0 };
 
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
@@ -202,32 +244,177 @@
         const colorPicker = document.getElementById('colorPicker');
         const brushSizeInput = document.getElementById('brushSize');
         const sizeValDisplay = document.getElementById('sizeVal');
+        const zoomInfo = document.getElementById('zoomInfo');
+
+        // Камера: зсув по x/y і масштаб. Через неї рахуємо, де точка на екрані.
+        const cam = { x: 0, y: 0, scale: 1 };
+        const MIN_SCALE = 0.15, MAX_SCALE = 40;
+
+        function screenToWorld(sx, sy) {
+            return { x: cam.x + sx / cam.scale, y: cam.y + sy / cam.scale };
+        }
+
+        // Окреме приховане полотно, куди складаємо всі намальовані пікселі.
+        // Малюємо туди один раз, а на екран потім просто копіюємо готову картинку.
+        // Тому при зумі чи зміні розміру вікна не треба малювати все заново.
+        const buf = document.createElement('canvas');
+        const bufCtx = buf.getContext('2d', { willReadFrequently: true });
+        let bufOX = 0, bufOY = 0; // де лівий верхній кут цього полотна у світі
+        const BUF_PAD = 256;
+        const BUF_MAX = 8192;
+
+        function ensureCapacity(minX, minY, maxX, maxY) {
+            if (buf.width === 0) {
+                bufOX = Math.floor(minX) - BUF_PAD;
+                bufOY = Math.floor(minY) - BUF_PAD;
+                buf.width = Math.min(BUF_MAX, Math.ceil(maxX - minX) + BUF_PAD * 2);
+                buf.height = Math.min(BUF_MAX, Math.ceil(maxY - minY) + BUF_PAD * 2);
+                bufCtx.imageSmoothingEnabled = false;
+                return;
+            }
+            let nOX = bufOX, nOY = bufOY;
+            let nMaxX = bufOX + buf.width, nMaxY = bufOY + buf.height;
+            if (minX < nOX) nOX = Math.floor(minX) - BUF_PAD;
+            if (minY < nOY) nOY = Math.floor(minY) - BUF_PAD;
+            if (maxX > nMaxX) nMaxX = Math.ceil(maxX) + BUF_PAD;
+            if (maxY > nMaxY) nMaxY = Math.ceil(maxY) + BUF_PAD;
+            // все вже влазить — нічого не робимо
+            if (nOX === bufOX && nOY === bufOY && nMaxX <= bufOX + buf.width && nMaxY <= bufOY + buf.height) return;
+            let nW = Math.min(BUF_MAX, nMaxX - nOX);
+            let nH = Math.min(BUF_MAX, nMaxY - nOY);
+            const tmp = document.createElement('canvas');
+            tmp.width = nW; tmp.height = nH;
+            const tctx = tmp.getContext('2d', { willReadFrequently: true });
+            tctx.imageSmoothingEnabled = false;
+            tctx.drawImage(buf, bufOX - nOX, bufOY - nOY);
+            buf.width = nW; buf.height = nH;
+            bufCtx.imageSmoothingEnabled = false;
+            bufCtx.clearRect(0, 0, nW, nH);
+            bufCtx.drawImage(tmp, 0, 0);
+            bufOX = nOX; bufOY = nOY;
+        }
+
+        // малює один квадратик. Якщо колір білий — стирає.
+        function drawBlock(startX, startY, size, color, author, locked) {
+            const erase = (color === ERASE_COLOR);
+            ensureCapacity(startX, startY, startX + size, startY + size);
+            const bx = startX - bufOX, by = startY - bufOY;
+            if (erase) {
+                bufCtx.clearRect(bx, by, size, size);
+            } else {
+                bufCtx.fillStyle = color;
+                bufCtx.fillRect(bx, by, size, size);
+            }
+            // запам'ятовуємо, хто малював. Не кожну точку, а через одну, щоб не гальмувало
+            const step = Math.max(1, Math.floor(size / 2));
+            for (let i = startX; i < startX + size; i += step) {
+                for (let j = startY; j < startY + size; j += step) {
+                    const key = `${i},${j}`;
+                    if (erase) delete pixelMap[key];
+                    else pixelMap[key] = { author, locked };
+                }
+            }
+            requestRender();
+        }
+
+        // який колір зараз у цій клітинці (треба, щоб уміти відмінити мазок)
+        function sampleColor(startX, startY, size) {
+            const cx = startX + (size >> 1) - bufOX;
+            const cy = startY + (size >> 1) - bufOY;
+            if (cx < 0 || cy < 0 || cx >= buf.width || cy >= buf.height) return ERASE_COLOR;
+            const d = bufCtx.getImageData(cx, cy, 1, 1).data;
+            if (d[3] === 0) return ERASE_COLOR;
+            return '#' + [d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join('');
+        }
+
+        // малюємо кадр на екран (не частіше, ніж треба)
+        let renderQueued = false;
+        function requestRender() {
+            if (renderQueued) return;
+            renderQueued = true;
+            requestAnimationFrame(renderFrame);
+        }
+
+        function renderFrame() {
+            renderQueued = false;
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // копіюємо наше приховане полотно на екран з урахуванням камери
+            ctx.imageSmoothingEnabled = false;
+            ctx.setTransform(cam.scale, 0, 0, cam.scale, -cam.x * cam.scale, -cam.y * cam.scale);
+            if (buf.width > 0) ctx.drawImage(buf, bufOX, bufOY);
+
+            // малюємо курсори інших гравців
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            const now = performance.now();
+            remoteCursors.forEach((c, name) => {
+                if (now - c.ts > 5000) return;
+                const sx = (c.x - cam.x) * cam.scale;
+                const sy = (c.y - cam.y) * cam.scale;
+                if (sx < -50 || sy < -50 || sx > canvas.width + 50 || sy > canvas.height + 50) return;
+                ctx.beginPath();
+                ctx.arc(sx, sy, 5, 0, Math.PI * 2);
+                ctx.fillStyle = c.color;
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                ctx.font = '12px Segoe UI, sans-serif';
+                const w = ctx.measureText(name).width;
+                ctx.fillStyle = 'rgba(0,0,0,0.65)';
+                ctx.fillRect(sx + 8, sy - 8, w + 8, 16);
+                ctx.fillStyle = c.color;
+                ctx.fillText(name, sx + 12, sy + 4);
+            });
+        }
+
+        function updateZoomInfo() {
+            zoomInfo.innerText = Math.round(cam.scale * 100) + '%';
+        }
+
+        function resetView() {
+            cam.x = 0; cam.y = 0; cam.scale = 1;
+            updateZoomInfo();
+            requestRender();
+        }
+
+        function colorForUser(name) {
+            let h = 0;
+            for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360;
+            return `hsl(${h}, 70%, 55%)`;
+        }
 
         brushSizeInput.addEventListener('input', (e) => {
             sizeValDisplay.innerText = e.target.value + 'px';
         });
 
+        let resizeTimer = null;
         function resizeCanvas() {
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
-            redrawEverything();
+            requestRender();
         }
 
         function login() {
             const input = document.getElementById('username').value.trim();
             if (!input) return alert('Нікнейм не може бути порожнім!');
             currentUser = input;
-            
+
             document.getElementById('login-screen').style.display = 'none';
             document.getElementById('app-screen').style.display = 'block';
             document.getElementById('userInfo').innerText = `| ${currentUser}`;
-            
+
             resizeCanvas();
-            window.addEventListener('resize', resizeCanvas);
-            
+            window.addEventListener('resize', () => {
+                clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(resizeCanvas, 100);
+            });
+
             loadPixels();
             setupRealtimeAndPresence();
             startNetworkLoops();
+            updateZoomInfo();
         }
 
         function setTool(tool) {
@@ -243,126 +430,297 @@
             btn.innerText = isLockedMode ? '🔒 Замок (Увімк)' : '🔓 Замок (Вимк)';
         }
 
-        function getCoords(e) {
-            const rect = canvas.getBoundingClientRect();
-            let clientX = e.clientX;
-            let clientY = e.clientY;
-            if (e.touches && e.touches.length > 0) {
-                clientX = e.touches[0].clientX;
-                clientY = e.touches[0].clientY;
+        // ставимо один мазок пензля в точці (centerX, centerY)
+        function stampAt(centerX, centerY) {
+            const size = parseInt(brushSizeInput.value);
+            const half = Math.floor(size / 2);
+            const startX = centerX - half;
+            const startY = centerY - half;
+
+            let color = colorPicker.value.toLowerCase();
+            let targetLockState = isLockedMode;
+
+            if (currentTool === 'eraser') {
+                // не стираємо чужі замкнені клітинки
+                if (blockHasForeignLock(startX, startY, size)) return;
+                color = ERASE_COLOR;
+                targetLockState = false;
+            } else if (color === ERASE_COLOR) {
+                // якщо хтось вибрав білий пензлик — це не ластик.
+                // трохи міняємо колір, щоб база не подумала, що це стирання.
+                color = '#fffffe';
             }
-            return { x: Math.floor(clientX - rect.left), y: Math.floor(clientY - rect.top) };
+
+            // перед малюванням запам'ятовуємо старий колір, щоб потім можна було відмінити
+            if (currentStroke && currentStroke.length < STROKE_BLOCK_CAP) {
+                currentStroke.push({ x: startX, y: startY, size, prevColor: sampleColor(startX, startY, size) });
+            }
+
+            drawBlock(startX, startY, size, color, currentUser, targetLockState);
+            queueAction({ x: startX, y: startY, size, color, user_nickname: currentUser, is_locked: targetLockState });
         }
 
-        function drawBlock(startX, startY, size, color, author, locked) {
-            ctx.fillStyle = color;
-            ctx.fillRect(startX, startY, size, size);
-
-            for (let i = startX; i < startX + size; i++) {
-                for (let j = startY; j < startY + size; j++) {
-                    if (color === '#ffffff') {
-                        delete pixelMap[`${i},${j}`];
-                    } else {
-                        pixelMap[`${i},${j}`] = { author: author, locked: locked };
-                    }
+        function blockHasForeignLock(startX, startY, size) {
+            const step = Math.max(1, Math.floor(size / 2));
+            for (let i = startX; i < startX + size; i += step) {
+                for (let j = startY; j < startY + size; j += step) {
+                    const p = pixelMap[`${i},${j}`];
+                    if (p && p.locked && p.author !== currentUser) return true;
                 }
+            }
+            return false;
+        }
+
+        function queueAction(actionData) {
+            // 1. Надсилаємо миттєво іншим гравцям по P2P
+            broadcastQueue.push(actionData);
+
+            // 2. ЗАПИСУЄМО В MAP: Якщо ти проведеш по цьому місцю ще раз за 2 секунди, старий запис просто перезапишеться, а не додасться до черги!
+            dbInsertMap.set(`${actionData.x},${actionData.y}`, actionData);
+        }
+
+        // малюємо мазки між двома точками, щоб лінія була суцільна, без дірок
+        function paintLine(x0, y0, x1, y1) {
+            const size = parseInt(brushSizeInput.value);
+            const spacing = Math.max(1, Math.floor(size / 3));
+            const dx = x1 - x0, dy = y1 - y0;
+            const dist = Math.hypot(dx, dy);
+            if (dist < spacing) { stampAt(x1, y1); return; }
+            const steps = Math.ceil(dist / spacing);
+            for (let s = 1; s <= steps; s++) {
+                const t = s / steps;
+                stampAt(Math.round(x0 + dx * t), Math.round(y0 + dy * t));
             }
         }
 
         function handlePaint(e) {
-            const coords = getCoords(e);
-            const size = parseInt(brushSizeInput.value);
-            const startX = coords.x - Math.floor(size / 2);
-            const startY = coords.y - Math.floor(size / 2);
-
-            if (startX === lastX && startY === lastY) return;
-            
-            const now = Date.now();
-            if (now - lastPaintTime < 12) return; 
-            lastPaintTime = now;
-            
-            lastX = startX;
-            lastY = startY;
-
-            let color = colorPicker.value;
-            let targetLockState = isLockedMode;
-
-            if (currentTool === 'eraser') {
-                color = '#ffffff';
-                targetLockState = false;
-
-                const centerPixel = pixelMap[`${coords.x},${coords.y}`];
-                if (centerPixel && centerPixel.locked && centerPixel.author !== currentUser) {
-                    return; 
-                }
+            const p = getScreenPoint(e);
+            const w = screenToWorld(p.x, p.y);
+            const cx = Math.floor(w.x), cy = Math.floor(w.y);
+            if (lastCenterX === null) {
+                stampAt(cx, cy);
+            } else if (cx !== lastCenterX || cy !== lastCenterY) {
+                paintLine(lastCenterX, lastCenterY, cx, cy);
             }
-
-            drawBlock(startX, startY, size, color, currentUser, targetLockState);
-            
-            const actionData = { 
-                x: startX, y: startY, size: size, color: color, 
-                user_nickname: currentUser, is_locked: targetLockState 
-            };
-            
-            // 1. Надсилаємо миттєво іншим гравцям по P2P
-            broadcastQueue.push(actionData);
-            
-            // 2. ЗАПИСУЄМО В MAP: Якщо ти проведеш по цьому місцю ще раз за 2 секунди, старий запис просто перезапишеться, а не додасться до черги!
-            const coordKey = `${startX},${startY}`;
-            dbInsertMap.set(coordKey, actionData);
-            
-            rawDataHistory.push(actionData);
+            lastCenterX = cx; lastCenterY = cy;
         }
 
-        canvas.addEventListener('mousedown', (e) => { isDrawing = true; lastX = null; lastY = null; handlePaint(e); });
-        canvas.addEventListener('mousemove', (e) => { if (isDrawing) handlePaint(e); });
-        window.addEventListener('mouseup', () => { isDrawing = false; });
+        function getScreenPoint(e) {
+            const rect = canvas.getBoundingClientRect();
+            let clientX = e.clientX, clientY = e.clientY;
+            if (e.touches && e.touches.length > 0) {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            }
+            return { x: clientX - rect.left, y: clientY - rect.top };
+        }
 
-        canvas.addEventListener('touchstart', (e) => { e.preventDefault(); isDrawing = true; lastX = null; lastY = null; handlePaint(e); }, { passive: false });
-        canvas.addEventListener('touchmove', (e) => { e.preventDefault(); if (isDrawing) handlePaint(e); }, { passive: false });
-        window.addEventListener('touchend', () => { isDrawing = false; });
+        function beginStroke() { currentStroke = []; }
+        function endStroke() {
+            if (currentStroke && currentStroke.length) {
+                undoStack.push(currentStroke);
+                if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+                document.getElementById('undoBtn').disabled = false;
+            }
+            currentStroke = null;
+        }
 
+        function undo() {
+            const stroke = undoStack.pop();
+            if (!stroke) return;
+            // повертаємо клітинкам старий колір і шлемо це так само, як звичайне малювання
+            for (let i = stroke.length - 1; i >= 0; i--) {
+                const b = stroke[i];
+                drawBlock(b.x, b.y, b.size, b.prevColor, currentUser, false);
+                queueAction({ x: b.x, y: b.y, size: b.size, color: b.prevColor, user_nickname: currentUser, is_locked: false });
+            }
+            document.getElementById('undoBtn').disabled = undoStack.length === 0;
+        }
+
+        // миша
+        let isPanning = false, panStart = null, spaceDown = false;
+
+        canvas.addEventListener('mousedown', (e) => {
+            if (e.button === 1 || spaceDown) { // середня кнопка або Space — рухаємо полотно
+                startPan(e); return;
+            }
+            if (e.button !== 0) return;
+            isDrawing = true; lastCenterX = null; lastCenterY = null;
+            beginStroke();
+            handlePaint(e);
+        });
         canvas.addEventListener('mousemove', (e) => {
-            if (isDrawing || (e.touches && e.touches.length > 0)) return;
-            const coords = getCoords(e);
-            const p = pixelMap[`${coords.x},${coords.y}`];
+            if (isPanning) { doPan(e); return; }
+            if (isDrawing) { handlePaint(e); return; }
+            handleHover(e);
+            maybeSendCursor(e);
+        });
+        window.addEventListener('mouseup', () => {
+            if (isPanning) endPan();
+            if (isDrawing) { isDrawing = false; endStroke(); }
+        });
+        canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
 
-            if (p) {
+        // колесо миші = зум. Наближаємо туди, де курсор
+        canvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const p = getScreenPoint(e);
+            const before = screenToWorld(p.x, p.y);
+            const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+            cam.scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, cam.scale * factor));
+            const after = screenToWorld(p.x, p.y);
+            cam.x += before.x - after.x;
+            cam.y += before.y - after.y;
+            updateZoomInfo();
+            requestRender();
+        }, { passive: false });
+
+        function startPan(e) {
+            e.preventDefault();
+            isPanning = true;
+            panStart = { sx: e.clientX, sy: e.clientY, camX: cam.x, camY: cam.y };
+            canvas.classList.add('panning');
+        }
+        function doPan(e) {
+            cam.x = panStart.camX - (e.clientX - panStart.sx) / cam.scale;
+            cam.y = panStart.camY - (e.clientY - panStart.sy) / cam.scale;
+            requestRender();
+        }
+        function endPan() { isPanning = false; canvas.classList.remove('panning'); }
+
+        // керування пальцями (телефон/планшет)
+        let touchMode = null, pinchStartDist = 0, pinchStartScale = 1, pinchMid = null;
+
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (e.touches.length === 1) {
+                touchMode = 'draw';
+                isDrawing = true; lastCenterX = null; lastCenterY = null;
+                beginStroke();
+                handlePaint(e);
+            } else if (e.touches.length === 2) {
+                touchMode = 'pan';
+                isDrawing = false; endStroke();
+                pinchStartDist = touchDist(e);
+                pinchStartScale = cam.scale;
+                pinchMid = touchMid(e);
+            }
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            if (touchMode === 'draw' && e.touches.length === 1) {
+                handlePaint(e);
+            } else if (touchMode === 'pan' && e.touches.length === 2) {
+                const dist = touchDist(e);
+                const mid = touchMid(e);
+                const before = screenToWorld(mid.x, mid.y);
+                cam.scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, pinchStartScale * dist / pinchStartDist));
+                const after = screenToWorld(mid.x, mid.y);
+                cam.x += before.x - after.x + (pinchMid.x - mid.x) / cam.scale;
+                cam.y += before.y - after.y + (pinchMid.y - mid.y) / cam.scale;
+                pinchMid = mid;
+                updateZoomInfo();
+                requestRender();
+            }
+        }, { passive: false });
+
+        window.addEventListener('touchend', (e) => {
+            if (isDrawing) { isDrawing = false; endStroke(); }
+            touchMode = null;
+        });
+
+        function touchDist(e) {
+            const r = canvas.getBoundingClientRect();
+            const a = e.touches[0], b = e.touches[1];
+            return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+        }
+        function touchMid(e) {
+            const r = canvas.getBoundingClientRect();
+            const a = e.touches[0], b = e.touches[1];
+            return { x: (a.clientX + b.clientX) / 2 - r.left, y: (a.clientY + b.clientY) / 2 - r.top };
+        }
+
+        // підказка "хто малював" і надсилання свого курсора
+        function handleHover(e) {
+            const p = getScreenPoint(e);
+            const w = screenToWorld(p.x, p.y);
+            const info = pixelMap[`${Math.floor(w.x)},${Math.floor(w.y)}`];
+            if (info) {
                 tooltip.style.display = 'block';
                 tooltip.style.left = (e.clientX + 15) + 'px';
                 tooltip.style.top = (e.clientY + 15) + 'px';
-                tooltip.innerText = `Малював: ${p.author}` + (p.locked ? ' 🔒' : '');
+                tooltip.innerText = `Малював: ${info.author}` + (info.locked ? ' 🔒' : '');
             } else {
                 tooltip.style.display = 'none';
             }
+        }
+
+        function maybeSendCursor(e) {
+            if (!room) return;
+            const now = performance.now();
+            if (now - lastCursorSent < 80) return;
+            lastCursorSent = now;
+            const p = getScreenPoint(e);
+            const w = screenToWorld(p.x, p.y);
+            room.send({ type: 'broadcast', event: 'cursor', payload: { user: currentUser, x: w.x, y: w.y } });
+        }
+
+        // гарячі клавіші
+        window.addEventListener('keydown', (e) => {
+            if (document.getElementById('app-screen').style.display === 'none') return;
+            if (e.target.tagName === 'INPUT') return;
+            if (e.code === 'Space') { spaceDown = true; return; }
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); return; }
+            switch (e.key.toLowerCase()) {
+                case 'b': setTool('brush'); break;
+                case 'e': setTool('eraser'); break;
+                case 's': e.preventDefault(); exportPNG(); break;
+                case '0': resetView(); break;
+                case '[': adjustBrush(-1); break;
+                case ']': adjustBrush(1); break;
+            }
         });
+        window.addEventListener('keyup', (e) => { if (e.code === 'Space') spaceDown = false; });
 
-        canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+        function adjustBrush(delta) {
+            let v = parseInt(brushSizeInput.value) + delta;
+            v = Math.min(50, Math.max(1, v));
+            brushSizeInput.value = v;
+            sizeValDisplay.innerText = v + 'px';
+        }
 
-        function redrawEverything() {
-            ctx.clearRect(0, 0, canvas.width, canvas.height); 
-            for (let key in pixelMap) delete pixelMap[key];
-            rawDataHistory.forEach(p => {
-                drawBlock(p.x, p.y, p.size || 1, p.color, p.user_nickname, p.is_locked);
+        // зберегти малюнок як картинку
+        function exportPNG() {
+            if (buf.width === 0) return alert('Полотно порожнє!');
+            buf.toBlob((blob) => {
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'pixels.png';
+                a.click();
+                URL.revokeObjectURL(url);
             });
         }
 
+        // завантажуємо те, що вже намалювали до нас
         async function loadPixels() {
-            const { data } = await supabaseClient.from('pixels')
+            const { data, error } = await supabaseClient.from('pixels')
                 .select('*')
-                .order('created_at', { ascending: true }) 
-                .limit(100000); 
-
+                .order('created_at', { ascending: true })
+                .limit(100000);
+            if (error) { console.error('Помилка завантаження:', error); return; }
             if (data) {
-                rawDataHistory = data;
-                redrawEverything();
+                // малюємо все один раз на наше приховане полотно
+                data.forEach(p => drawBlock(p.x, p.y, p.size || 1, p.color, p.user_nickname, p.is_locked));
             }
         }
 
+        // таймери, які шлють дані по мережі
         function startNetworkLoops() {
             // Швидкісні P2P сокети (60мс) - візуально літає
             setInterval(() => {
-                if (broadcastQueue.length > 0) {
+                if (broadcastQueue.length > 0 && room) {
                     room.send({ type: 'broadcast', event: 'p2p_action', payload: broadcastQueue });
                     broadcastQueue = [];
                 }
@@ -370,20 +728,19 @@
 
             // Надійна та оптимізована Супа (2 секунди)
             setInterval(async () => {
-                if (dbInsertMap.size > 0) {
-                    // Конвертуємо наш очищений від дублікатів словник назад у масив
-                    const batch = Array.from(dbInsertMap.values());
-                    dbInsertMap.clear();
-
-                    // Розбиваємо на чанки по 400 пікселів, щоб Супа точно не вдавилася
-                    const chunkSize = 400;
-                    for (let i = 0; i < batch.length; i += chunkSize) {
-                        const chunk = batch.slice(i, i + chunkSize);
-                        try {
-                            await supabaseClient.from('pixels').insert(chunk);
-                        } catch (err) {
-                            console.error("Помилка збереження в Супу:", err);
-                        }
+                if (dbInsertMap.size === 0) return;
+                // Конвертуємо наш очищений від дублікатів словник назад у масив
+                const batch = Array.from(dbInsertMap.values());
+                dbInsertMap.clear();
+                // Розбиваємо на чанки по 400 пікселів, щоб Супа точно не вдавилася
+                const chunkSize = 400;
+                for (let i = 0; i < batch.length; i += chunkSize) {
+                    const chunk = batch.slice(i, i + chunkSize);
+                    try {
+                        const { error } = await supabaseClient.from('pixels').insert(chunk);
+                        if (error) console.error('Помилка збереження в Супу:', error);
+                    } catch (err) {
+                        console.error('Помилка збереження в Супу:', err);
                     }
                 }
             }, 2000);
@@ -400,6 +757,8 @@
                 Object.keys(state).forEach(id => {
                     onlineUsers.add(state[id][0].user_nickname);
                 });
+                // Прибираємо курсори тих, хто вийшов
+                remoteCursors.forEach((_, name) => { if (!onlineUsers.has(name)) remoteCursors.delete(name); });
                 updateVoteUI();
                 checkClearCondition();
             });
@@ -411,20 +770,20 @@
             });
 
             room.on('broadcast', { event: 'p2p_action' }, (payload) => {
-                const actions = payload.payload;
-                actions.forEach(p => {
-                    rawDataHistory.push(p);
+                payload.payload.forEach(p => {
                     drawBlock(p.x, p.y, p.size || 1, p.color, p.user_nickname, p.is_locked);
                 });
             });
 
+            room.on('broadcast', { event: 'cursor' }, (payload) => {
+                const c = payload.payload;
+                if (c.user === currentUser) return;
+                remoteCursors.set(c.user, { x: c.x, y: c.y, ts: performance.now(), color: colorForUser(c.user) });
+                requestRender();
+            });
+
             room.on('broadcast', { event: 'p2p_wipe' }, () => {
-                votedUsers.clear();
-                myVote = false;
-                document.getElementById('voteBtn').classList.remove('active');
-                rawDataHistory = [];
-                redrawEverything();
-                updateVoteUI();
+                localWipe();
             });
 
             room.subscribe(async (status) => {
@@ -434,15 +793,15 @@
             });
         }
 
+        // голосування за очищення полотна
         function castVote() {
-            if (!myVote) {
-                myVote = true;
-                votedUsers.add(currentUser);
-                document.getElementById('voteBtn').classList.add('active');
-                room.send({ type: 'broadcast', event: 'vote_clear', payload: { user: currentUser } });
-                updateVoteUI();
-                checkClearCondition();
-            }
+            if (myVote) return;
+            myVote = true;
+            votedUsers.add(currentUser);
+            document.getElementById('voteBtn').classList.add('active');
+            room.send({ type: 'broadcast', event: 'vote_clear', payload: { user: currentUser } });
+            updateVoteUI();
+            checkClearCondition();
         }
 
         function updateVoteUI() {
@@ -451,22 +810,39 @@
             document.getElementById('voteBtn').innerText = `🧨 Стерти все (${activeVotes.length}/${total})`;
         }
 
+        function localWipe() {
+            votedUsers.clear();
+            myVote = false;
+            isClearing = false;
+            document.getElementById('voteBtn').classList.remove('active');
+            // чистимо полотно
+            buf.width = 0; buf.height = 0;
+            bufOX = 0; bufOY = 0;
+            for (const k in pixelMap) delete pixelMap[k];
+            undoStack.length = 0;
+            document.getElementById('undoBtn').disabled = true;
+            updateVoteUI();
+            requestRender();
+        }
+
         async function checkClearCondition() {
             const activeVotes = [...votedUsers].filter(u => onlineUsers.has(u));
             const total = onlineUsers.size || 1;
-            
-            if (activeVotes.length >= total && total > 0) {
-                await supabaseClient.from('pixels').delete().neq('size', -1);
-                room.send({ type: 'broadcast', event: 'p2p_wipe', payload: {} });
+            if (activeVotes.length < total || total === 0 || isClearing) return;
 
-                votedUsers.clear();
-                myVote = false;
-                document.getElementById('voteBtn').classList.remove('active');
-                
-                rawDataHistory = [];
-                redrawEverything();
-                updateVoteUI();
-                alert("Усі проголосували! Полотно очищено 🧨");
+            // хай базу чистить тільки один гравець (у кого нік перший за абеткою),
+            // щоб кілька людей не запускали очищення одночасно
+            const leader = [...onlineUsers].sort()[0];
+            isClearing = true;
+            if (leader === currentUser) {
+                try {
+                    await supabaseClient.from('pixels').delete().neq('size', -1);
+                } catch (err) {
+                    console.error('Помилка очищення Супи:', err);
+                }
+                room.send({ type: 'broadcast', event: 'p2p_wipe', payload: {} });
+                localWipe();
+                alert('Усі проголосували! Полотно очищено 🧨');
             }
         }
     </script>
