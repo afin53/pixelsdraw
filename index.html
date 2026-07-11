@@ -2,33 +2,95 @@
 <html lang="uk">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Pixel Art Community</title>
-    <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; background: #f0f0f0; margin: 0; padding: 20px; }
+        #login-screen { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        #app-screen { display: none; }
+        .toolbar { margin-bottom: 10px; display: flex; gap: 10px; }
+        canvas { background: white; border: 2px solid #333; cursor: crosshair; }
+        #tooltip { position: fixed; background: rgba(0,0,0,0.8); color: white; padding: 4px 8px; border-radius: 4px; pointer-events: none; display: none; z-index: 1000; }
+        button { cursor: pointer; padding: 5px 10px; }
+        .active { background: #ddd; }
+    </style>
 </head>
 <body>
 
     <div id="login-screen">
-        <h2>Введіть свій нікнейм, щоб почати</h2>
-        <input type="text" id="username-input" placeholder="Твій крутий нік" autocomplete="off">
-        <button id="login-btn">Увійти та малювати</button>
+        <h2>Введіть нікнейм</h2>
+        <input type="text" id="username" placeholder="Твій нік...">
+        <button onclick="login()">Увійти</button>
     </div>
 
-    <div id="app-screen" style="display: none;">
+    <div id="app-screen">
         <div class="toolbar">
-            <input type="color" id="color-picker" value="#ff0000">
-            <button id="brush-btn" class="active">🖌️ Пензлик</button>
-            <button id="eraser-btn">🧽 Ластік</button>
-            <span id="current-user-display"></span>
+            <input type="color" id="colorPicker" value="#ff0000">
+            <button id="brushBtn" class="active" onclick="setTool('brush')">🖌️ Пензлик</button>
+            <button id="eraserBtn" onclick="setTool('eraser')">🧽 Ластік</button>
         </div>
-        
-        <div class="canvas-container">
-            <canvas id="canvas" width="500" height="500"></canvas>
-            <div id="tooltip"></div>
-        </div>
+        <canvas id="canvas" width="500" height="500"></canvas>
+        <div id="tooltip"></div>
     </div>
 
-    <script src="script.js"></script>
+    <script>
+        const supabase = supabase.createClient(
+            'https://gisxvbtkjbiagslporjq.supabase.co', 
+            'sb_publishable_o4Z1p2Y6_OzV0cH_BptYew_BNp8MpVY'
+        );
+
+        let currentUser = '', currentTool = 'brush', currentColor = '#ff0000';
+        const canvas = document.getElementById('canvas'), ctx = canvas.getContext('2d');
+        const pixelMap = {}, tooltip = document.getElementById('tooltip');
+
+        function login() {
+            currentUser = document.getElementById('username').value;
+            if(!currentUser) return alert('Введи нік!');
+            document.getElementById('login-screen').style.display = 'none';
+            document.getElementById('app-screen').style.display = 'block';
+            loadPixels();
+            subscribe();
+        }
+
+        function setTool(tool) {
+            currentTool = tool;
+            document.getElementById('brushBtn').className = tool === 'brush' ? 'active' : '';
+            document.getElementById('eraserBtn').className = tool === 'eraser' ? 'active' : '';
+        }
+
+        function draw(x, y, color, user) {
+            ctx.fillStyle = color;
+            ctx.fillRect(x, y, 1, 1);
+            pixelMap[`${x},${y}`] = user;
+        }
+
+        canvas.addEventListener('mousedown', async (e) => {
+            const x = Math.floor(e.offsetX), y = Math.floor(e.offsetY);
+            const color = currentTool === 'eraser' ? '#ffffff' : document.getElementById('colorPicker').value;
+            draw(x, y, color, currentUser);
+            await supabase.from('pixels').insert([{ x, y, color, user_nickname: currentUser }]);
+        });
+
+        canvas.onmousemove = (e) => {
+            const key = `${Math.floor(e.offsetX)},${Math.floor(e.offsetY)}`;
+            if (pixelMap[key]) {
+                tooltip.style.display = 'block';
+                tooltip.style.left = (e.clientX + 10) + 'px';
+                tooltip.style.top = (e.clientY + 10) + 'px';
+                tooltip.innerText = 'Автор: ' + pixelMap[key];
+            } else tooltip.style.display = 'none';
+        };
+
+        async function loadPixels() {
+            const { data } = await supabase.from('pixels').select('*');
+            data?.forEach(p => draw(p.x, p.y, p.color, p.user_nickname));
+        }
+
+        function subscribe() {
+            supabase.channel('p').on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'pixels' }, p => {
+                if (p.new.user_nickname !== currentUser) draw(p.new.x, p.new.y, p.new.color, p.new.user_nickname);
+            }).subscribe();
+        }
+    </script>
 </body>
 </html>
