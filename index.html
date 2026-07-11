@@ -2,94 +2,282 @@
 <html lang="uk">
 <head>
     <meta charset="UTF-8">
-    <title>Pixel Art Community</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pixel Art Reddit Community</title>
+    
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    
     <style>
-        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; background: #f0f0f0; margin: 0; padding: 20px; }
-        #login-screen { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        #app-screen { display: none; }
-        .toolbar { margin-bottom: 10px; display: flex; gap: 10px; }
-        canvas { background: white; border: 2px solid #333; cursor: crosshair; }
-        #tooltip { position: fixed; background: rgba(0,0,0,0.8); color: white; padding: 4px 8px; border-radius: 4px; pointer-events: none; display: none; z-index: 1000; }
-        button { cursor: pointer; padding: 5px 10px; }
-        .active { background: #ddd; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #2c3e50;
+            color: #ecf0f1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        /* Екран логіну */
+        #login-screen {
+            background: #34495e;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            text-align: center;
+        }
+
+        #login-screen input {
+            padding: 12px;
+            font-size: 16px;
+            border: none;
+            border-radius: 6px;
+            width: 200px;
+            margin-right: 10px;
+            outline: none;
+        }
+
+        #login-screen button {
+            padding: 12px 24px;
+            font-size: 16px;
+            background-color: #e74c3c;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        #login-screen button:hover {
+            background-color: #c0392b;
+        }
+
+        /* Головний екран програми */
+        #app-screen {
+            display: none; /* Сховано до авторизації */
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* Панель інструментів */
+        .toolbar {
+            background: #34495e;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        }
+
+        .toolbar button {
+            padding: 10px 20px;
+            font-size: 14px;
+            border: 2px solid transparent;
+            border-radius: 6px;
+            cursor: pointer;
+            background: #7f8c8d;
+            color: white;
+            transition: 0.2s;
+        }
+
+        .toolbar button.active {
+            background: #2ecc71;
+            border-color: #27ae60;
+        }
+
+        #colorPicker {
+            border: none;
+            width: 40px;
+            height: 40px;
+            border-radius: 5px;
+            cursor: pointer;
+            padding: 0;
+        }
+
+        /* Полотно */
+        .canvas-container {
+            position: relative;
+        }
+
+        canvas {
+            background-color: #ffffff;
+            border: 4px solid #34495e;
+            border-radius: 4px;
+            cursor: crosshair;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+
+        /* Спливаюча підказка (Нікнейм) */
+        #tooltip {
+            position: fixed;
+            background: rgba(0, 0, 0, 0.85);
+            color: #fff;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 14px;
+            pointer-events: none; /* Мишка проходить крізь нього */
+            display: none;
+            z-index: 9999;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            white-space: nowrap;
+        }
     </style>
 </head>
 <body>
 
     <div id="login-screen">
-        <h2>Введіть нікнейм</h2>
-        <input type="text" id="username" placeholder="Твій нік...">
-        <button onclick="login()">Увійти</button>
+        <h2>Введи свій нікнейм</h2>
+        <input type="text" id="username" placeholder="Твій нік..." autocomplete="off">
+        <button onclick="login()">Почати малювати</button>
     </div>
 
-    <div id="app-screen">
+    <div id="app-screen" style="display: none;">
         <div class="toolbar">
-            <input type="color" id="colorPicker" value="#ff0000">
+            <input type="color" id="colorPicker" value="#000000">
             <button id="brushBtn" class="active" onclick="setTool('brush')">🖌️ Пензлик</button>
             <button id="eraserBtn" onclick="setTool('eraser')">🧽 Ластік</button>
+            <span id="userInfo" style="margin-left: 20px; font-weight: bold;"></span>
         </div>
-        <canvas id="canvas" width="500" height="500"></canvas>
-        <div id="tooltip"></div>
+        
+        <div class="canvas-container">
+            <canvas id="canvas" width="500" height="500"></canvas>
+        </div>
     </div>
 
+    <div id="tooltip"></div>
+
     <script>
-        const supabase = supabase.createClient(
-            'https://gisxvbtkjbiagslporjq.supabase.co', 
-            'sb_publishable_o4Z1p2Y6_OzV0cH_BptYew_BNp8MpVY'
-        );
+        // 1. Ініціалізація Supabase (ТВОЇ КЛЮЧІ)
+        const supabaseUrl = 'https://gisxvbtkjbiagslporjq.supabase.co';
+        const supabaseKey = 'sb_publishable_o4Z1p2Y6_OzV0cH_BptYew_BNp8MpVY';
+        const supabase = supabase.createClient(supabaseUrl, supabaseKey);
 
-        let currentUser = '', currentTool = 'brush', currentColor = '#ff0000';
-        const canvas = document.getElementById('canvas'), ctx = canvas.getContext('2d');
-        const pixelMap = {}, tooltip = document.getElementById('tooltip');
+        // 2. Глобальні змінні
+        let currentUser = '';
+        let currentTool = 'brush';
+        const pixelMap = {}; // Словник для збереження авторів пікселів: {"x,y": "Нікнейм"}
 
+        // 3. Елементи DOM
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const tooltip = document.getElementById('tooltip');
+        const colorPicker = document.getElementById('colorPicker');
+
+        // --- ФУНКЦІЇ ЛОГІКИ ---
+
+        // Авторизація
         function login() {
-            currentUser = document.getElementById('username').value;
-            if(!currentUser) return alert('Введи нік!');
+            const input = document.getElementById('username').value.trim();
+            if (!input) {
+                alert('Нікнейм не може бути порожнім!');
+                return;
+            }
+            currentUser = input;
+            
+            // Ховаємо логін, показуємо інтерфейс
             document.getElementById('login-screen').style.display = 'none';
-            document.getElementById('app-screen').style.display = 'block';
+            document.getElementById('app-screen').style.display = 'flex';
+            document.getElementById('userInfo').innerText = `Ти: ${currentUser}`;
+            
+            // Завантажуємо дані та підключаємось
             loadPixels();
-            subscribe();
+            subscribeToRealtime();
         }
 
+        // Перемикання інструментів
         function setTool(tool) {
             currentTool = tool;
-            document.getElementById('brushBtn').className = tool === 'brush' ? 'active' : '';
-            document.getElementById('eraserBtn').className = tool === 'eraser' ? 'active' : '';
+            document.getElementById('brushBtn').classList.toggle('active', tool === 'brush');
+            document.getElementById('eraserBtn').classList.toggle('active', tool === 'eraser');
         }
 
-        function draw(x, y, color, user) {
+        // Відмальовка одного пікселя і збереження його автора в пам'ять браузера
+        function drawPixel(x, y, color, author) {
             ctx.fillStyle = color;
             ctx.fillRect(x, y, 1, 1);
-            pixelMap[`${x},${y}`] = user;
+            pixelMap[`${x},${y}`] = author;
         }
 
+        // --- ВЗАЄМОДІЯ З ПОЛОТНОМ ---
+
+        // Клік по полотну (Малювання)
         canvas.addEventListener('mousedown', async (e) => {
-            const x = Math.floor(e.offsetX), y = Math.floor(e.offsetY);
-            const color = currentTool === 'eraser' ? '#ffffff' : document.getElementById('colorPicker').value;
-            draw(x, y, color, currentUser);
-            await supabase.from('pixels').insert([{ x, y, color, user_nickname: currentUser }]);
+            // Точні координати кліку
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.floor(e.clientX - rect.left);
+            const y = Math.floor(e.clientY - rect.top);
+            
+            // Якщо ластік — малюємо білим, інакше — вибраним кольором
+            const color = currentTool === 'eraser' ? '#ffffff' : colorPicker.value;
+
+            // Малюємо в себе відразу (щоб не чекати сервер)
+            drawPixel(x, y, color, currentUser);
+
+            // Відправляємо дані в Supabase
+            const { error } = await supabase.from('pixels').insert([
+                { x: x, y: y, color: color, user_nickname: currentUser }
+            ]);
+
+            if (error) {
+                console.error('Помилка збереження:', error);
+            }
         });
 
-        canvas.onmousemove = (e) => {
-            const key = `${Math.floor(e.offsetX)},${Math.floor(e.offsetY)}`;
-            if (pixelMap[key]) {
-                tooltip.style.display = 'block';
-                tooltip.style.left = (e.clientX + 10) + 'px';
-                tooltip.style.top = (e.clientY + 10) + 'px';
-                tooltip.innerText = 'Автор: ' + pixelMap[key];
-            } else tooltip.style.display = 'none';
-        };
+        // Рух мишки (Тултип з нікнеймом)
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.floor(e.clientX - rect.left);
+            const y = Math.floor(e.clientY - rect.top);
+            const key = `${x},${y}`;
+            
+            const author = pixelMap[key];
 
+            // Показуємо тултип тільки якщо піксель намальований і він не "стертий" (не білий)
+            if (author && author !== '#ffffff') {
+                tooltip.style.display = 'block';
+                tooltip.style.left = (e.clientX + 15) + 'px';
+                tooltip.style.top = (e.clientY + 15) + 'px';
+                tooltip.innerText = `Малював: ${author}`;
+            } else {
+                tooltip.style.display = 'none';
+            }
+        });
+
+        // Ховаємо тултип, якщо мишка пішла з полотна
+        canvas.addEventListener('mouseleave', () => {
+            tooltip.style.display = 'none';
+        });
+
+        // --- ВЗАЄМОДІЯ З SUPABASE ---
+
+        // Завантаження всієї дошки при старті
         async function loadPixels() {
-            const { data } = await supabase.from('pixels').select('*');
-            data?.forEach(p => draw(p.x, p.y, p.color, p.user_nickname));
+            const { data, error } = await supabase.from('pixels').select('*');
+            if (error) {
+                console.error('Помилка завантаження:', error);
+                return;
+            }
+            if (data) {
+                data.forEach(p => drawPixel(p.x, p.y, p.color, p.user_nickname));
+            }
         }
 
-        function subscribe() {
-            supabase.channel('p').on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'pixels' }, p => {
-                if (p.new.user_nickname !== currentUser) draw(p.new.x, p.new.y, p.new.color, p.new.user_nickname);
-            }).subscribe();
+        // Підписка на оновлення в реальному часі (Realtime)
+        function subscribeToRealtime() {
+            supabase.channel('public:pixels')
+                .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'pixels' }, payload => {
+                    const newPixel = payload.new;
+                    // Відмальовуємо чужі кліки
+                    if (newPixel.user_nickname !== currentUser) {
+                        drawPixel(newPixel.x, newPixel.y, newPixel.color, newPixel.user_nickname);
+                    }
+                })
+                .subscribe();
         }
     </script>
 </body>
