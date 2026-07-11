@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pixel Art Community</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+
+    <div id="login-screen">
+        <h2>Введіть свій нікнейм, щоб почати</h2>
+        <input type="text" id="username-input" placeholder="Твій крутий нік" autocomplete="off">
+        <button id="login-btn">Увійти та малювати</button>
+    </div>
+
+    <div id="app-screen" style="display: none;">
+        <div class="toolbar">
+            <input type="color" id="color-picker" value="#ff0000">
+            <button id="brush-btn" class="active">🖌️ Пензлик</button>
+            <button id="eraser-btn">🧽 Ластік</button>
+            <span id="current-user-display"></span>
+        </div>
+        
+        <div class="canvas-container">
+            <canvas id="canvas" width="500" height="500"></canvas>
+            <div id="tooltip"></div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
