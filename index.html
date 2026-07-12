@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>pixel for world </title>
+    <title>pixel for world - Ultimate No-Image Edition</title>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         body {
@@ -46,7 +46,7 @@
         }
         .toolbar.hidden { top: -200px; } 
 
-        .toolbar button, .toolbar input[type="file"]::-webkit-file-upload-button {
+        .toolbar button {
             padding: 6px 10px; font-size: 12px; border: none; border-radius: 15px; cursor: pointer; background: #7f8c8d; color: white; transition: 0.2s;
         }
         .toolbar button.active { background: #2ecc71; }
@@ -104,16 +104,13 @@
             <button id="micBtn" onclick="toggleVoice()">🎙️ Голосуха</button>
             <button id="voteBtn" class="vote-btn" onclick="castVote()">🧨 (0/0)</button>
             <button onclick="showOnline()">👥 Онлайн</button>
-            
-            <input type="file" id="imageLoader" accept="image/png, image/jpeg" style="width: 150px; font-size: 12px;">
-            <button onclick="stampImage()" style="background: #9b59b6;">🖼️ Друк фото</button>
         </div>
         
         <div id="canvas-container">
             <canvas id="canvas"></canvas>
         </div>
         
-        <div id="save-timer">ALL-IN-ONE | Зум: Коліщатко | Переміщення: СКМ</div>
+        <div id="save-timer">Зум: Коліщатко / 2 пальці | Переміщення: СКМ / 2 пальці</div>
         <div id="voice-toast">🔊 Хтось говорить...</div>
     </div>
 
@@ -157,9 +154,6 @@
         // Для мобільного зуму
         let initialScale = 1;
         let touchStartDist = 0;
-
-        // Фотографії
-        let loadedImg = null;
 
         // Войс чат
         let mediaRecorder, audioChunks = [], isRecording = false, onMicCooldown = false, micTimeout;
@@ -254,7 +248,7 @@
         });
         window.addEventListener('mouseup', (e) => { if (e.button === 1) isPanning = false; });
 
-        // ----- ТАЧ ДЛЯ ТЕЛЕФОНІВ (Малвання 1 пальцем, Камера 2 пальцями) -----
+        // ----- ТАЧ ДЛЯ ТЕЛЕФОНІВ (Малювання 1 пальцем, Камера 2 пальцями) -----
         canvas.addEventListener('touchstart', (e) => {
             if (e.touches.length === 1) {
                 isDrawing = true; handlePaint(e.touches[0].clientX, e.touches[0].clientY);
@@ -436,43 +430,6 @@
                     room.send({ type: 'broadcast', event: 'p2p_wipe_user', payload: { user: targetUser }});
                 });
             }
-        }
-
-        // ----- ДРУК ФОТО -----
-        document.getElementById('imageLoader').addEventListener('change', function(e){
-            const reader = new FileReader();
-            reader.onload = function(event){
-                const img = new Image();
-                img.onload = function(){ loadedImg = img; alert("Фото готове! Натисни 'Друк фото'."); }
-                img.src = event.target.result;
-            }
-            reader.readAsDataURL(e.target.files[0]);
-        });
-        function stampImage() {
-            if (!loadedImg) return alert("Спочатку вибери файл!");
-            const tempCanvas = document.createElement('canvas'); const tempCtx = tempCanvas.getContext('2d');
-            const maxDimension = 60; 
-            let w = loadedImg.width, h = loadedImg.height;
-            if (w > h) { h = Math.floor((h / w) * maxDimension); w = maxDimension; } else { w = Math.floor((w / h) * maxDimension); h = maxDimension; }
-            tempCanvas.width = w; tempCanvas.height = h; tempCtx.drawImage(loadedImg, 0, 0, w, h);
-            const imgData = tempCtx.getImageData(0, 0, w, h).data;
-            const startX = Math.floor((-panX + window.innerWidth/2) / scale);
-            const startY = Math.floor((-panY + window.innerHeight/2) / scale);
-            const pixelSize = 4; 
-            
-            for (let y = 0; y < h; y++) {
-                for (let x = 0; x < w; x++) {
-                    const i = (y * w + x) * 4;
-                    if (imgData[i+3] > 128) {
-                        const color = `#${imgData[i].toString(16).padStart(2,'0')}${imgData[i+1].toString(16).padStart(2,'0')}${imgData[i+2].toString(16).padStart(2,'0')}`;
-                        const pxX = startX + (x * pixelSize); const pxY = startY + (y * pixelSize);
-                        drawBlock(pxX, pxY, pixelSize, color, currentUser, false);
-                        const data = { x: pxX, y: pxY, size: pixelSize, color: color, user_nickname: currentUser, is_locked: false };
-                        broadcastQueue.push(data); dbInsertMap.set(`${pxX},${pxY}`, data); rawDataHistory.push(data);
-                    }
-                }
-            }
-            loadedImg = null; 
         }
 
         // ----- МЕРЕЖА -----
