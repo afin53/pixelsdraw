@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>pixel for world - Ultimate No-Image Edition</title>
+    <title>pixel for world - Smooth No-Image Edition</title>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         body {
@@ -110,7 +110,7 @@
             <canvas id="canvas"></canvas>
         </div>
         
-        <div id="save-timer">Зум: Коліщатко / 2 пальці | Переміщення: СКМ / 2 пальці</div>
+        <div id="save-timer">Плавне малювання | Зум: Коліщатко / 2 пальці | Переміщення: СКМ / 2 пальці</div>
         <div id="voice-toast">🔊 Хтось говорить...</div>
     </div>
 
@@ -151,9 +151,12 @@
         let startPanX = 0;
         let startPanY = 0;
         
-        // Для мобільного зуму
+        // Для мобільного зуму і плавного малювання
         let initialScale = 1;
         let touchStartDist = 0;
+        let lastDrawCoords = null;
+        let lastPaintedX = null;
+        let lastPaintedY = null;
 
         // Войс чат
         let mediaRecorder, audioChunks = [], isRecording = false, onMicCooldown = false, micTimeout;
@@ -251,9 +254,14 @@
         // ----- ТАЧ ДЛЯ ТЕЛЕФОНІВ (Малювання 1 пальцем, Камера 2 пальцями) -----
         canvas.addEventListener('touchstart', (e) => {
             if (e.touches.length === 1) {
-                isDrawing = true; handlePaint(e.touches[0].clientX, e.touches[0].clientY);
+                isDrawing = true; 
+                lastPaintedX = null; lastPaintedY = null;
+                const coords = getCoords(e.touches[0].clientX, e.touches[0].clientY);
+                lastDrawCoords = coords;
+                drawInterpolated(coords.x, coords.y, coords.x, coords.y);
             } else if (e.touches.length === 2) {
                 isDrawing = false;
+                lastDrawCoords = null;
                 touchStartDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
                 startPanX = ((e.touches[0].clientX + e.touches[1].clientX) / 2) - panX;
                 startPanY = ((e.touches[0].clientY + e.touches[1].clientY) / 2) - panY;
@@ -264,7 +272,9 @@
         canvas.addEventListener('touchmove', (e) => {
             e.preventDefault();
             if (isDrawing && e.touches.length === 1) {
-                handlePaint(e.touches[0].clientX, e.touches[0].clientY);
+                const coords = getCoords(e.touches[0].clientX, e.touches[0].clientY);
+                if (lastDrawCoords) drawInterpolated(lastDrawCoords.x, lastDrawCoords.y, coords.x, coords.y);
+                lastDrawCoords = coords;
             } else if (e.touches.length === 2) {
                 const currentDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
                 scale = Math.min(Math.max(0.2, initialScale * (currentDist / touchStartDist)), 4);
@@ -277,9 +287,9 @@
             }
         }, { passive: false });
         
-        window.addEventListener('touchend', () => { isDrawing = false; });
+        window.addEventListener('touchend', () => { isDrawing = false; lastDrawCoords = null; });
 
-        // ----- МАЛЮВАННЯ -----
+        // ----- МАЛЮВАННЯ (З Інтерполяцією) -----
         function drawBlock(startX, startY, size, color, author, locked) {
             ctx.fillStyle = color;
             ctx.fillRect(startX, startY, size, size);
@@ -291,15 +301,38 @@
             }
         }
 
-        function handlePaint(clientX, clientY) {
-            const coords = getCoords(clientX, clientY);
-            
-            // АНТИ-ХАКЕР
+        // Алгоритм згладжування ліній
+        function drawInterpolated(x0, y0, x1, y1) {
+            const dx = x1 - x0;
+            const dy = y1 - y0;
+            const steps = Math.max(Math.abs(dx), Math.abs(dy));
+
+            if (steps === 0) {
+                paintPixel(x0, y0);
+                return;
+            }
+
+            const xInc = dx / steps;
+            const yInc = dy / steps;
+            let x = x0;
+            let y = y0;
+
+            for (let i = 0; i <= steps; i++) {
+                paintPixel(Math.round(x), Math.round(y));
+                x += xInc;
+                y += yInc;
+            }
+        }
+
+        function paintPixel(targetX, targetY) {
             let rawSize = parseInt(brushSizeInput.value) || 5;
             let size = Math.min(Math.max(1, rawSize), 50); 
             
-            const startX = coords.x - Math.floor(size / 2);
-            const startY = coords.y - Math.floor(size / 2);
+            const startX = targetX - Math.floor(size / 2);
+            const startY = targetY - Math.floor(size / 2);
+
+            // Запобігаємо дублюванню малювання одного й того самого пікселя при повільному русі
+            if (startX === lastPaintedX && startY === lastPaintedY) return;
 
             let color = document.getElementById('colorPicker').value;
             let targetLockState = isLockedMode;
@@ -324,12 +357,29 @@
             dbInsertMap.set(`${startX},${startY}`, data);
             rawDataHistory.push(data);
             undoStack.push(data);
+
+            lastPaintedX = startX;
+            lastPaintedY = startY;
         }
 
         // Мишка
-        canvas.addEventListener('mousedown', (e) => { if(e.button === 0) { isDrawing = true; handlePaint(e.clientX, e.clientY); }});
-        canvas.addEventListener('mousemove', (e) => { if (isDrawing && !isPanning) handlePaint(e.clientX, e.clientY); });
-        window.addEventListener('mouseup', () => { isDrawing = false; });
+        canvas.addEventListener('mousedown', (e) => { 
+            if(e.button === 0) { 
+                isDrawing = true; 
+                lastPaintedX = null; lastPaintedY = null;
+                const coords = getCoords(e.clientX, e.clientY);
+                lastDrawCoords = coords;
+                drawInterpolated(coords.x, coords.y, coords.x, coords.y);
+            }
+        });
+        canvas.addEventListener('mousemove', (e) => { 
+            if (isDrawing && !isPanning) {
+                const coords = getCoords(e.clientX, e.clientY);
+                if (lastDrawCoords) drawInterpolated(lastDrawCoords.x, lastDrawCoords.y, coords.x, coords.y);
+                lastDrawCoords = coords;
+            }
+        });
+        window.addEventListener('mouseup', () => { isDrawing = false; lastDrawCoords = null; });
 
         // ----- ВІДМІНА -----
         function undoAction() {
